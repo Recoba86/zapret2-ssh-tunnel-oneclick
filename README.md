@@ -9,6 +9,7 @@ Menu-driven Bash manager for building and maintaining obfuscated SSH tunnels on 
 - One `systemd` unit per target (`ssh-tunnel-<name>.service`)
 - Persistent management menu you can open anytime
 - Add/remove/list/restart targets without reinstalling everything
+- A tunnel dashboard (summary + drill-down per tunnel)
 
 ## Features
 
@@ -19,6 +20,7 @@ Menu-driven Bash manager for building and maintaining obfuscated SSH tunnels on 
 - NFQUEUE rule automation per SSH destination port
 - SSH key creation + optional `ssh-copy-id` automation
 - End-to-end service and listening-port verification
+- Pretty dashboard view: SVC state, local listen ratio, and quick SSH connectivity check
 
 ## Requirements
 
@@ -58,9 +60,19 @@ sudo zapret2-tunnel
 sudo ./setup_zapret2_tunnel.sh --menu
 sudo ./setup_zapret2_tunnel.sh --initial-setup
 sudo ./setup_zapret2_tunnel.sh --add-target
-sudo ./setup_zapret2_tunnel.sh --status
+sudo ./setup_zapret2_tunnel.sh --dashboard
+sudo ./setup_zapret2_tunnel.sh --restart-all
 sudo ./setup_zapret2_tunnel.sh --install-command
 ```
+
+## Dashboard
+
+Use menu option `6` (or `--dashboard`) to see a clean overview per tunnel, then select a tunnel to view details.
+
+## Naming
+
+When adding a tunnel, you choose a friendly name (examples: `Sweden`, `UK`, `Germany-1`).
+The manager derives a safe key from it (used for systemd unit names).
 
 ## Multi-Server Mapping Example
 
@@ -75,7 +87,7 @@ Add each target from menu option `2` with its own server IP, SSH port, and local
 - Main script: `setup_zapret2_tunnel.sh`
 - Mirror copy: `scripts/setup_zapret2_tunnel.sh`
 - Config store: `/etc/ssh-tunnel-manager/targets.conf`
-- Tunnel units: `/etc/systemd/system/ssh-tunnel-<name>.service`
+- Tunnel units: `/etc/systemd/system/ssh-tunnel-<key>.service`
 - Manager command: `/usr/local/sbin/zapret2-tunnel`
 
 ## Security Notes

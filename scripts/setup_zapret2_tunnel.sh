@@ -9,6 +9,7 @@ if [[ -t 1 ]]; then
   C_YELLOW='\033[1;33m'
   C_BLUE='\033[0;34m'
   C_BOLD='\033[1m'
+  C_DIM='\033[2m'
 else
   C_RESET=''
   C_RED=''
@@ -16,6 +17,7 @@ else
   C_YELLOW=''
   C_BLUE=''
   C_BOLD=''
+  C_DIM=''
 fi
 
 log_info()    { echo -e "${C_BLUE}[INFO]${C_RESET} $*"; }
@@ -30,6 +32,11 @@ MANAGER_COMMAND="/usr/local/sbin/zapret2-tunnel"
 ZAPRET_ARCHIVE_URL="https://h4.linklick.ir/b7d0be65a9a3ddfe3fa03008b69680fc/zapret2.tar.gz"
 SELF_INSTALL_URL="https://raw.githubusercontent.com/Recoba86/zapret2-ssh-tunnel-oneclick/main/setup_zapret2_tunnel.sh"
 NFQUEUE_NUM="100"
+
+# targets.conf format (new):
+#   key|label|foreign_ip|foreign_ssh_port|ports_csv
+# Backward compatible (old):
+#   key|foreign_ip|foreign_ssh_port|ports_csv
 
 on_error() {
   local exit_code=$?
@@ -62,6 +69,11 @@ ensure_storage() {
   touch "${TARGETS_FILE}"
   chmod 700 "${CONFIG_DIR}"
   chmod 600 "${TARGETS_FILE}"
+}
+
+trim() {
+  # Trim leading/trailing whitespace
+  echo "$1" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
 }
 
 validate_ipv4() {
@@ -106,7 +118,7 @@ prompt_yes_no() {
   done
 }
 
-sanitize_name() {
+sanitize_key() {
   local raw="$1"
   local clean
   clean="$(echo "${raw}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')"
@@ -117,13 +129,27 @@ sanitize_name() {
 }
 
 target_exists() {
-  local target_name="$1"
-  awk -F'|' -v n="${target_name}" '$1 == n {found=1} END{exit !found}' "${TARGETS_FILE}"
+  local target_key="$1"
+  awk -F'|' -v n="${target_key}" '$1 == n {found=1} END{exit !found}' "${TARGETS_FILE}"
 }
 
 service_name_for_target() {
-  local target_name="$1"
-  echo "ssh-tunnel-${target_name}.service"
+  local target_key="$1"
+  echo "ssh-tunnel-${target_key}.service"
+}
+
+read_target_line() {
+  # Input: a single line (pipe-separated). Output: key|label|ip|ssh_port|ports_csv
+  local line="$1"
+  local f1 f2 f3 f4 f5
+  IFS='|' read -r f1 f2 f3 f4 f5 <<<"${line}"
+
+  if [[ -n "${f5}" ]]; then
+    echo "${f1}|${f2}|${f3}|${f4}|${f5}"
+  else
+    # old format
+    echo "${f1}|${f1}|${f2}|${f3}|${f4}"
+  fi
 }
 
 ensure_packages() {
@@ -239,20 +265,28 @@ ensure_zapret2_running() {
 ensure_nfqueue_rule() {
   local ssh_port="$1"
   if iptables -C OUTPUT -p tcp --dport "${ssh_port}" -j NFQUEUE --queue-num "${NFQUEUE_NUM}" >/dev/null 2>&1; then
-    log_success "NFQUEUE rule already exists for SSH port ${ssh_port}."
-  else
-    iptables -I OUTPUT -p tcp --dport "${ssh_port}" -j NFQUEUE --queue-num "${NFQUEUE_NUM}"
-    log_success "NFQUEUE rule added for SSH port ${ssh_port}."
+    return 0
   fi
+  iptables -I OUTPUT -p tcp --dport "${ssh_port}" -j NFQUEUE --queue-num "${NFQUEUE_NUM}"
 }
 
 ssh_port_used_by_any_target() {
   local ssh_port="$1"
-  awk -F'|' -v p="${ssh_port}" '$3 == p {found=1} END{exit !found}' "${TARGETS_FILE}"
+  local line
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    local parsed
+    parsed="$(read_target_line "${line}")"
+    local _key _label _ip _ssh_port _ports
+    IFS='|' read -r _key _label _ip _ssh_port _ports <<<"${parsed}"
+    [[ "${_ssh_port}" == "${ssh_port}" ]] && return 0
+  done < "${TARGETS_FILE}"
+  return 1
 }
 
 remove_nfqueue_rule_if_unused() {
   local ssh_port="$1"
+
   if ssh_port_used_by_any_target "${ssh_port}"; then
     return 0
   fi
@@ -289,25 +323,32 @@ copy_ssh_key() {
 
 port_in_use_by_other_target() {
   local query_port="$1"
-  while IFS='|' read -r _name _ip _ssh_port csv_ports; do
-    [[ -n "${_name}" ]] || continue
+  local line
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    local parsed
+    parsed="$(read_target_line "${line}")"
+    local _key _label _ip _ssh_port ports_csv
+    IFS='|' read -r _key _label _ip _ssh_port ports_csv <<<"${parsed}"
+
     local -a ports_arr=()
-    IFS=',' read -r -a ports_arr <<<"${csv_ports}"
+    IFS=',' read -r -a ports_arr <<<"${ports_csv}"
     local p
     for p in "${ports_arr[@]}"; do
       [[ "${p}" == "${query_port}" ]] && return 0
     done
   done < "${TARGETS_FILE}"
+
   return 1
 }
 
 build_forward_flags() {
-  local csv_ports="$1"
+  local ports_csv="$1"
   local -a ports_arr=()
   local flags=""
   local p
 
-  IFS=',' read -r -a ports_arr <<<"${csv_ports}"
+  IFS=',' read -r -a ports_arr <<<"${ports_csv}"
   for p in "${ports_arr[@]}"; do
     flags+="-L 0.0.0.0:${p}:localhost:${p} "
   done
@@ -317,19 +358,19 @@ build_forward_flags() {
 }
 
 write_target_service() {
-  local target_name="$1"
+  local target_key="$1"
   local foreign_ip="$2"
   local foreign_ssh_port="$3"
-  local csv_ports="$4"
+  local ports_csv="$4"
   local unit_name
   local forward_flags
 
-  unit_name="$(service_name_for_target "${target_name}")"
-  forward_flags="$(build_forward_flags "${csv_ports}")"
+  unit_name="$(service_name_for_target "${target_key}")"
+  forward_flags="$(build_forward_flags "${ports_csv}")"
 
   cat > "/etc/systemd/system/${unit_name}" <<UNIT
 [Unit]
-Description=Persistent SSH Tunnel (${target_name})
+Description=Persistent SSH Tunnel (${target_key})
 After=network-online.target zapret2.service
 Wants=network-online.target
 
@@ -346,35 +387,56 @@ UNIT
   systemctl daemon-reload
   systemctl enable "${unit_name}"
   systemctl restart "${unit_name}"
-
-  log_success "Service ${unit_name} is active."
 }
 
 append_target_config() {
-  local target_name="$1"
-  local foreign_ip="$2"
-  local foreign_ssh_port="$3"
-  local csv_ports="$4"
+  local target_key="$1"
+  local target_label="$2"
+  local foreign_ip="$3"
+  local foreign_ssh_port="$4"
+  local ports_csv="$5"
 
-  echo "${target_name}|${foreign_ip}|${foreign_ssh_port}|${csv_ports}" >> "${TARGETS_FILE}"
+  # Disallow '|' in label
+  target_label="${target_label//|/}"
+
+  echo "${target_key}|${target_label}|${foreign_ip}|${foreign_ssh_port}|${ports_csv}" >> "${TARGETS_FILE}"
 }
 
 prompt_target_details() {
-  local default_name
-  local raw_name
+  local default_label
+  local raw_label
+  local derived_key
 
   while true; do
-    default_name="target-$(($(wc -l < "${TARGETS_FILE}") + 1))"
-    read -r -p "Enter target name [${default_name}]: " raw_name
-    raw_name="${raw_name:-${default_name}}"
-    TARGET_NAME="$(sanitize_name "${raw_name}")"
+    default_label="Target $(( $(wc -l < "${TARGETS_FILE}") + 1 ))"
+    read -r -p "Enter a tunnel name (e.g., sweden, uk, germany-1) [${default_label}]: " raw_label
+    raw_label="$(trim "${raw_label:-${default_label}}")"
+    # Normalize whitespace to a single ASCII space.
+    raw_label="$(echo "${raw_label}" | tr -s '[:space:]' ' ')"
 
-    if target_exists "${TARGET_NAME}"; then
-      log_warn "Target name '${TARGET_NAME}' already exists. Use a different name."
+    # Keep config ASCII-friendly and predictable (avoid bash =~ regex with literal spaces).
+    if (( ${#raw_label} < 2 || ${#raw_label} > 32 )); then
+      log_warn "Name must be 2-32 characters."
       continue
     fi
+    if [[ "${raw_label}" =~ [^A-Za-z0-9_-[:space:]] ]]; then
+      log_warn "Name may contain only letters/numbers/spaces/_/-."
+      continue
+    fi
+
+    derived_key="$(sanitize_key "${raw_label}")"
+
+    if target_exists "${derived_key}"; then
+      log_warn "A tunnel with key '${derived_key}' already exists. Choose a different name."
+      continue
+    fi
+
+    TARGET_KEY="${derived_key}"
+    TARGET_LABEL="${raw_label}"
     break
   done
+
+  log_info "Tunnel key will be: ${TARGET_KEY}"
 
   while true; do
     read -r -p "Enter Foreign Server IP: " TARGET_IP
@@ -392,7 +454,7 @@ prompt_target_details() {
   fi
 
   while true; do
-    read -r -a TARGET_PORTS -p "Enter local ports for this target (space-separated, e.g. 3031 3032): "
+    read -r -a TARGET_PORTS -p "Enter local ports for this tunnel (space-separated, e.g. 31 32 4000): "
 
     if [[ ${#TARGET_PORTS[@]} -eq 0 ]]; then
       log_warn "Please provide at least one port."
@@ -410,12 +472,12 @@ prompt_target_details() {
         break
       fi
       if [[ -n "${seen["${p}"]+x}" ]]; then
-        log_warn "Duplicate port in this target: ${p}. Please re-enter all ports."
+        log_warn "Duplicate port in this tunnel: ${p}. Please re-enter all ports."
         valid="no"
         break
       fi
       if port_in_use_by_other_target "${p}"; then
-        log_warn "Port ${p} is already assigned to another target."
+        log_warn "Port ${p} is already assigned to another tunnel."
         valid="no"
         break
       fi
@@ -440,7 +502,7 @@ add_target_flow() {
   prompt_target_details
   ensure_root_ssh_key
 
-  if prompt_yes_no "Run ssh-copy-id for ${TARGET_IP}:${TARGET_SSH_PORT} now?" "y"; then
+  if prompt_yes_no "Run ssh-copy-id for ${TARGET_LABEL} (${TARGET_IP}:${TARGET_SSH_PORT}) now?" "y"; then
     local target_pass
     while true; do
       read -r -s -p "Enter Foreign Server Root Password: " target_pass
@@ -452,16 +514,39 @@ add_target_flow() {
     log_info "Copying SSH key to remote server..."
     copy_ssh_key "${TARGET_IP}" "${TARGET_SSH_PORT}" "${target_pass}"
     unset target_pass
-    log_success "Passwordless SSH login configured for ${TARGET_NAME}."
+    log_success "Passwordless SSH login configured for ${TARGET_LABEL}."
   else
     log_warn "Skipped ssh-copy-id. Make sure key-based auth is already configured."
   fi
 
-  append_target_config "${TARGET_NAME}" "${TARGET_IP}" "${TARGET_SSH_PORT}" "${TARGET_PORTS_CSV}"
+  append_target_config "${TARGET_KEY}" "${TARGET_LABEL}" "${TARGET_IP}" "${TARGET_SSH_PORT}" "${TARGET_PORTS_CSV}"
   ensure_nfqueue_rule "${TARGET_SSH_PORT}"
-  write_target_service "${TARGET_NAME}" "${TARGET_IP}" "${TARGET_SSH_PORT}" "${TARGET_PORTS_CSV}"
+  write_target_service "${TARGET_KEY}" "${TARGET_IP}" "${TARGET_SSH_PORT}" "${TARGET_PORTS_CSV}"
 
-  log_success "Target '${TARGET_NAME}' added with ports: ${TARGET_PORTS[*]}"
+  log_success "Tunnel '${TARGET_LABEL}' added with ports: ${TARGET_PORTS[*]}"
+}
+
+install_manager_command() {
+  log_info "Installing management command at ${MANAGER_COMMAND} ..."
+  local current_source="${BASH_SOURCE[0]}"
+
+  if [[ -f "${current_source}" && "${current_source}" != /dev/fd/* ]]; then
+    install -m 0755 "${current_source}" "${MANAGER_COMMAND}"
+    log_success "Command installed. Run: ${MANAGER_COMMAND}"
+    return 0
+  fi
+
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "${SELF_INSTALL_URL}" -o "${MANAGER_COMMAND}"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "${MANAGER_COMMAND}" "${SELF_INSTALL_URL}"
+  else
+    log_error "Could not install manager command: neither curl nor wget is available."
+    return 1
+  fi
+
+  chmod 0755 "${MANAGER_COMMAND}"
+  log_success "Command installed. Run: ${MANAGER_COMMAND}"
 }
 
 initial_setup_flow() {
@@ -491,7 +576,32 @@ initial_setup_flow() {
   log_success "Initial setup completed."
 }
 
-list_targets() {
+collect_targets_arrays() {
+  # Outputs global arrays: T_KEYS, T_LABELS, T_IPS, T_SSH_PORTS, T_PORTS_CSV
+  T_KEYS=()
+  T_LABELS=()
+  T_IPS=()
+  T_SSH_PORTS=()
+  T_PORTS_CSV=()
+
+  local line
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    local parsed
+    parsed="$(read_target_line "${line}")"
+
+    local k l ip sp pc
+    IFS='|' read -r k l ip sp pc <<<"${parsed}"
+
+    T_KEYS+=("${k}")
+    T_LABELS+=("${l}")
+    T_IPS+=("${ip}")
+    T_SSH_PORTS+=("${sp}")
+    T_PORTS_CSV+=("${pc}")
+  done < "${TARGETS_FILE}"
+}
+
+list_targets_basic() {
   ensure_storage
 
   if [[ ! -s "${TARGETS_FILE}" ]]; then
@@ -499,159 +609,329 @@ list_targets() {
     return 0
   fi
 
-  printf "\n${C_BOLD}Configured Tunnel Targets${C_RESET}\n"
-  printf "%-4s %-20s %-17s %-9s %s\n" "#" "NAME" "FOREIGN_IP" "SSH_PORT" "PORTS"
-  printf "%-4s %-20s %-17s %-9s %s\n" "--" "--------------------" "-----------------" "---------" "----------------"
+  collect_targets_arrays
 
-  local idx=0
-  while IFS='|' read -r name ip ssh_port ports_csv; do
-    [[ -n "${name}" ]] || continue
-    idx=$((idx + 1))
-    printf "%-4s %-20s %-17s %-9s %s\n" "${idx}" "${name}" "${ip}" "${ssh_port}" "${ports_csv//,/ }"
-  done < "${TARGETS_FILE}"
+  printf "\n${C_BOLD}Configured Tunnel Targets${C_RESET}\n"
+  printf "%-4s %-20s %-14s %-17s %-9s %s\n" "#" "NAME" "KEY" "FOREIGN_IP" "SSH_PORT" "PORTS"
+  printf "%-4s %-20s %-14s %-17s %-9s %s\n" "--" "--------------------" "--------------" "-----------------" "---------" "----------------"
+
+  local i
+  for ((i=0; i<${#T_KEYS[@]}; i++)); do
+    printf "%-4s %-20s %-14s %-17s %-9s %s\n" "$((i+1))" "${T_LABELS[$i]}" "${T_KEYS[$i]}" "${T_IPS[$i]}" "${T_SSH_PORTS[$i]}" "${T_PORTS_CSV[$i]//,/ }"
+  done
   echo
 }
 
 remove_target_flow() {
   ensure_storage
 
-  local -a names=()
-  local -a ssh_ports=()
-
-  while IFS='|' read -r name _ip ssh_port _ports_csv; do
-    [[ -n "${name}" ]] || continue
-    names+=("${name}")
-    ssh_ports+=("${ssh_port}")
-  done < "${TARGETS_FILE}"
-
-  if [[ ${#names[@]} -eq 0 ]]; then
+  if [[ ! -s "${TARGETS_FILE}" ]]; then
     log_warn "No targets to remove."
     return 0
   fi
 
-  list_targets
+  list_targets_basic
+  collect_targets_arrays
 
   local choice
   while true; do
     read -r -p "Enter target number to remove: " choice
-    if [[ "${choice}" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#names[@]} )); then
+    if [[ "${choice}" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#T_KEYS[@]} )); then
       break
     fi
     log_warn "Invalid selection."
   done
 
   local idx=$((choice - 1))
-  local target_name="${names[${idx}]}"
-  local target_ssh_port="${ssh_ports[${idx}]}"
+  local target_key="${T_KEYS[${idx}]}"
+  local target_label="${T_LABELS[${idx}]}"
+  local target_ssh_port="${T_SSH_PORTS[${idx}]}"
   local unit_name
-  unit_name="$(service_name_for_target "${target_name}")"
+  unit_name="$(service_name_for_target "${target_key}")"
 
   systemctl stop "${unit_name}" 2>/dev/null || true
   systemctl disable "${unit_name}" 2>/dev/null || true
   rm -f "/etc/systemd/system/${unit_name}"
 
-  awk -F'|' -v n="${target_name}" '$1 != n' "${TARGETS_FILE}" > "${TARGETS_FILE}.tmp"
+  awk -F'|' -v n="${target_key}" '$1 != n' "${TARGETS_FILE}" > "${TARGETS_FILE}.tmp"
   mv "${TARGETS_FILE}.tmp" "${TARGETS_FILE}"
 
   systemctl daemon-reload
   remove_nfqueue_rule_if_unused "${target_ssh_port}"
 
-  log_success "Target '${target_name}' removed."
+  log_success "Tunnel '${target_label}' removed."
 }
 
 restart_all_tunnels() {
   ensure_storage
   ensure_zapret2_running
 
+  if [[ ! -s "${TARGETS_FILE}" ]]; then
+    log_warn "No configured targets found."
+    return 0
+  fi
+
   local restarted=0
-  while IFS='|' read -r name _ip ssh_port ports_csv; do
-    [[ -n "${name}" ]] || continue
-    ensure_nfqueue_rule "${ssh_port}"
-    write_target_service "${name}" "${_ip}" "${ssh_port}" "${ports_csv}"
+  local line
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    local parsed
+    parsed="$(read_target_line "${line}")"
+
+    local k l ip sp pc
+    IFS='|' read -r k l ip sp pc <<<"${parsed}"
+
+    ensure_nfqueue_rule "${sp}"
+    write_target_service "${k}" "${ip}" "${sp}" "${pc}"
     restarted=$((restarted + 1))
   done < "${TARGETS_FILE}"
 
-  if (( restarted == 0 )); then
-    log_warn "No configured targets found."
-  else
-    log_success "Restarted/reloaded ${restarted} tunnel target(s)."
-  fi
+  log_success "Restarted/reloaded ${restarted} tunnel target(s)."
 }
 
-status_flow() {
-  ensure_storage
+is_port_listening() {
+  local port="$1"
 
-  log_info "Service status: zapret2"
-  systemctl --no-pager --full status zapret2.service || true
-
-  local units_found=0
-  while IFS='|' read -r name _ip _ssh_port _ports_csv; do
-    [[ -n "${name}" ]] || continue
-    units_found=$((units_found + 1))
-    local unit_name
-    unit_name="$(service_name_for_target "${name}")"
-    log_info "Service status: ${unit_name}"
-    systemctl --no-pager --full status "${unit_name}" || true
-  done < "${TARGETS_FILE}"
-
-  if (( units_found == 0 )); then
-    log_warn "No tunnel services configured."
-  fi
-
-  if ! command -v netstat >/dev/null 2>&1; then
-    log_warn "netstat not found. Install net-tools to check listening ports."
-    return 0
-  fi
-
-  local -a all_ports=()
-  while IFS='|' read -r _name _ip _ssh_port csv_ports; do
-    [[ -n "${_name}" ]] || continue
-    local -a tmp_ports=()
-    IFS=',' read -r -a tmp_ports <<<"${csv_ports}"
-    local p
-    for p in "${tmp_ports[@]}"; do
-      all_ports+=("${p}")
-    done
-  done < "${TARGETS_FILE}"
-
-  if [[ ${#all_ports[@]} -eq 0 ]]; then
-    log_warn "No ports configured yet."
-    return 0
-  fi
-
-  local pattern
-  pattern="$(printf ':%s|' "${all_ports[@]}")"
-  pattern="${pattern%|}"
-
-  log_info "Listening port check via netstat..."
-  if netstat -tunlp | grep -E "${pattern}"; then
-    log_success "Configured tunnel ports are listening."
-  else
-    log_warn "No listening sockets found for configured ports."
-  fi
-}
-
-install_manager_command() {
-  log_info "Installing management command at ${MANAGER_COMMAND} ..."
-  local current_source="${BASH_SOURCE[0]}"
-
-  if [[ -f "${current_source}" && "${current_source}" != /dev/fd/* ]]; then
-    install -m 0755 "${current_source}" "${MANAGER_COMMAND}"
-    log_success "Command installed. Run: ${MANAGER_COMMAND}"
-    return 0
-  fi
-
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "${SELF_INSTALL_URL}" -o "${MANAGER_COMMAND}"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -qO "${MANAGER_COMMAND}" "${SELF_INSTALL_URL}"
-  else
-    log_error "Could not install manager command: neither curl nor wget is available."
+  if command -v ss >/dev/null 2>&1; then
+    if ss -ltnH 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)${port}$"; then
+      return 0
+    fi
     return 1
   fi
 
-  chmod 0755 "${MANAGER_COMMAND}"
-  log_success "Command installed. Run: ${MANAGER_COMMAND}"
+  if command -v netstat >/dev/null 2>&1; then
+    if netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)${port}$"; then
+      return 0
+    fi
+    return 1
+  fi
+
+  return 1
+}
+
+target_ports_health() {
+  # Input: ports_csv. Output: "ok_count/total" and returns 0 if all ok.
+  local ports_csv="$1"
+  local -a ports_arr=()
+  IFS=',' read -r -a ports_arr <<<"${ports_csv}"
+
+  local total=${#ports_arr[@]}
+  local ok=0
+  local p
+  for p in "${ports_arr[@]}"; do
+    if is_port_listening "${p}"; then
+      ok=$((ok + 1))
+    fi
+  done
+
+  echo "${ok}/${total}"
+  [[ ${ok} -eq ${total} ]]
+}
+
+ssh_connectivity_check() {
+  local ip="$1"
+  local ssh_port="$2"
+
+  # Best-effort quick check (key-based). Do not fail the dashboard if it fails.
+  if ! command -v ssh >/dev/null 2>&1; then
+    echo "N/A"
+    return 0
+  fi
+
+  local cmd=(ssh -p "${ssh_port}" -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@"${ip}" true)
+
+  if command -v timeout >/dev/null 2>&1; then
+    if timeout 7 "${cmd[@]}" >/dev/null 2>&1; then
+      echo "OK"
+    else
+      echo "FAIL"
+    fi
+  else
+    if "${cmd[@]}" >/dev/null 2>&1; then
+      echo "OK"
+    else
+      echo "FAIL"
+    fi
+  fi
+}
+
+status_badge() {
+  local state="$1"
+  case "${state}" in
+    OK)   echo -e "${C_GREEN}OK${C_RESET}" ;;
+    WARN) echo -e "${C_YELLOW}WARN${C_RESET}" ;;
+    DOWN) echo -e "${C_RED}DOWN${C_RESET}" ;;
+    *)    echo -e "${C_DIM}${state}${C_RESET}" ;;
+  esac
+}
+
+dashboard_table() {
+  ensure_storage
+
+  if [[ ! -s "${TARGETS_FILE}" ]]; then
+    log_warn "No tunnel targets configured yet."
+    return 0
+  fi
+
+  collect_targets_arrays
+
+  printf "\n${C_BOLD}Tunnel Dashboard${C_RESET}\n"
+  printf "%-4s %-18s %-12s %-16s %-8s %-15s %-8s %-9s %s\n" "#" "NAME" "KEY" "FOREIGN_IP" "SSH" "PORTS" "SVC" "LISTEN" "SSH"
+  printf "%-4s %-18s %-12s %-16s %-8s %-15s %-8s %-9s %s\n" "--" "------------------" "------------" "----------------" "------" "---------------" "------" "---------" "---"
+
+  local i
+  for ((i=0; i<${#T_KEYS[@]}; i++)); do
+    local key="${T_KEYS[$i]}"
+    local label="${T_LABELS[$i]}"
+    local ip="${T_IPS[$i]}"
+    local ssh_port="${T_SSH_PORTS[$i]}"
+    local ports_csv="${T_PORTS_CSV[$i]}"
+
+    local unit
+    unit="$(service_name_for_target "${key}")"
+
+    local is_active
+    is_active="$(systemctl is-active "${unit}" 2>/dev/null || true)"
+
+    local svc_state
+    case "${is_active}" in
+      active) svc_state="OK" ;;
+      activating|deactivating) svc_state="WARN" ;;
+      failed) svc_state="DOWN" ;;
+      *) svc_state="DOWN" ;;
+    esac
+
+    local listen_ratio
+    listen_ratio="$(target_ports_health "${ports_csv}")"
+    local listen_badge
+    if [[ "${listen_ratio}" == */* ]] && [[ "${listen_ratio%/*}" == "${listen_ratio#*/}" ]]; then
+      listen_badge="$(status_badge OK)"
+    else
+      listen_badge="$(status_badge WARN)"
+    fi
+
+    local ssh_check
+    ssh_check="$(ssh_connectivity_check "${ip}" "${ssh_port}")"
+    local ssh_badge
+    if [[ "${ssh_check}" == "OK" ]]; then
+      ssh_badge="$(status_badge OK)"
+    elif [[ "${ssh_check}" == "FAIL" ]]; then
+      ssh_badge="$(status_badge WARN)"
+    else
+      ssh_badge="${ssh_check}"
+    fi
+
+    printf "%-4s %-18s %-12s %-16s %-8s %-15s %-8b %-9b %b\n" \
+      "$((i+1))" \
+      "${label:0:18}" \
+      "${key:0:12}" \
+      "${ip:0:16}" \
+      "${ssh_port}" \
+      "${ports_csv//,/ }" \
+      "$(status_badge "${svc_state}")" \
+      "${listen_badge} ${C_DIM}(${listen_ratio})${C_RESET}" \
+      "${ssh_badge}"
+  done
+
+  echo
+  echo -e "${C_DIM}Legend:${C_RESET} SVC=systemd state, LISTEN=local ports listening, SSH=quick key-based connectivity test"
+}
+
+dashboard_details() {
+  local idx="$1"
+
+  local key="${T_KEYS[$idx]}"
+  local label="${T_LABELS[$idx]}"
+  local ip="${T_IPS[$idx]}"
+  local ssh_port="${T_SSH_PORTS[$idx]}"
+  local ports_csv="${T_PORTS_CSV[$idx]}"
+
+  local unit
+  unit="$(service_name_for_target "${key}")"
+
+  echo
+  echo -e "${C_BOLD}==============================================${C_RESET}"
+  echo -e "${C_BOLD} Tunnel Details: ${label}${C_RESET}"
+  echo -e "${C_BOLD}==============================================${C_RESET}"
+  echo -e "Name: ${label}"
+  echo -e "Key:  ${key}"
+  echo -e "Host: ${ip}:${ssh_port}"
+  echo -e "Ports: ${ports_csv//,/ }"
+  echo
+
+  log_info "systemd status (${unit})"
+  systemctl --no-pager --full status "${unit}" || true
+
+  echo
+  log_info "Listening ports"
+  local -a ports_arr=()
+  IFS=',' read -r -a ports_arr <<<"${ports_csv}"
+  local p
+  for p in "${ports_arr[@]}"; do
+    if is_port_listening "${p}"; then
+      echo -e "  ${C_GREEN}LISTEN${C_RESET} :${p}"
+    else
+      echo -e "  ${C_RED}CLOSED${C_RESET} :${p}"
+    fi
+  done
+
+  echo
+  log_info "SSH connectivity (key-based)"
+  local check
+  check="$(ssh_connectivity_check "${ip}" "${ssh_port}")"
+  if [[ "${check}" == "OK" ]]; then
+    log_success "SSH connectivity OK"
+  else
+    log_warn "SSH connectivity check failed (this does not always mean the tunnel is down)."
+  fi
+
+  if prompt_yes_no "Show last 50 journal lines for ${unit}?" "n"; then
+    echo
+    journalctl -u "${unit}" -n 50 --no-pager || true
+  fi
+}
+
+dashboard_flow() {
+  ensure_storage
+
+  if [[ ! -s "${TARGETS_FILE}" ]]; then
+    log_warn "No tunnel targets configured yet."
+    return 0
+  fi
+
+  while true; do
+    dashboard_table
+
+    collect_targets_arrays
+    local choice
+    read -r -p "Select a tunnel for details (0 to go back): " choice
+
+    if [[ "${choice}" =~ ^[0-9]+$ ]] && (( choice == 0 )); then
+      return 0
+    fi
+
+    if [[ "${choice}" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#T_KEYS[@]} )); then
+      dashboard_details $((choice - 1))
+      pause_prompt
+    else
+      log_warn "Invalid selection."
+    fi
+  done
+}
+
+show_help() {
+  cat <<HELP
+Usage: $(basename "$0") [option]
+
+Options:
+  --menu             Open interactive menu (default)
+  --initial-setup    Run initial setup flow directly
+  --add-target       Add a new tunnel target directly
+  --dashboard        Show the tunnel dashboard (summary + drill-down)
+  --restart-all      Restart/rebuild all tunnel services
+  --install-command  Install/update ${MANAGER_COMMAND}
+  -h, --help         Show this help
+HELP
 }
 
 show_main_menu() {
@@ -659,12 +939,12 @@ show_main_menu() {
   echo -e "${C_BOLD}==============================================${C_RESET}"
   echo -e "${C_BOLD} Zapret2 + Multi-Target SSH Tunnel Manager    ${C_RESET}"
   echo -e "${C_BOLD}==============================================${C_RESET}"
-  echo "1) Initial setup (fresh install/reset + add first target)"
-  echo "2) Add new tunnel target (server/ports)"
-  echo "3) List configured targets"
-  echo "4) Remove a target"
+  echo "1) Initial setup (fresh install/reset + add first tunnel)"
+  echo "2) Add new tunnel (server/ports)"
+  echo "3) List configured tunnels"
+  echo "4) Remove a tunnel"
   echo "5) Restart/rebuild all tunnel services"
-  echo "6) Show service status + listening ports"
+  echo "6) Tunnel dashboard (pretty status + details)"
   echo "7) Install/update management command (${MANAGER_COMMAND})"
   echo "0) Exit"
 }
@@ -684,7 +964,7 @@ run_menu() {
         pause_prompt
         ;;
       3)
-        list_targets
+        list_targets_basic
         pause_prompt
         ;;
       4)
@@ -696,8 +976,7 @@ run_menu() {
         pause_prompt
         ;;
       6)
-        status_flow
-        pause_prompt
+        dashboard_flow
         ;;
       7)
         install_manager_command
@@ -712,20 +991,6 @@ run_menu() {
         ;;
     esac
   done
-}
-
-show_help() {
-  cat <<HELP
-Usage: $(basename "$0") [option]
-
-Options:
-  --menu             Open interactive menu (default)
-  --initial-setup    Run initial setup flow directly
-  --add-target       Add a new tunnel target directly
-  --status           Show service status and listening ports
-  --install-command  Install/update ${MANAGER_COMMAND}
-  -h, --help         Show this help
-HELP
 }
 
 main() {
@@ -749,8 +1014,11 @@ main() {
     --add-target)
       add_target_flow
       ;;
-    --status)
-      status_flow
+    --dashboard)
+      dashboard_flow
+      ;;
+    --restart-all)
+      restart_all_tunnels
       ;;
     --install-command)
       install_manager_command
