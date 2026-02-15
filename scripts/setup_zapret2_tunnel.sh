@@ -55,6 +55,21 @@ require_cmd() {
   fi
 }
 
+install_file() {
+  # Portable-ish file install helper: prefers `install`, falls back to cp+chmod.
+  local mode="$1"
+  local src="$2"
+  local dest="$3"
+
+  if command -v install >/dev/null 2>&1; then
+    install -m "${mode}" "${src}" "${dest}"
+    return 0
+  fi
+
+  cp -f "${src}" "${dest}"
+  chmod "${mode}" "${dest}"
+}
+
 pause_prompt() {
   read -r -p "Press Enter to continue... " _
 }
@@ -230,6 +245,10 @@ apply_zapret2_profile() {
   local filename
   filename="$(profile_filename_for_choice "${choice}")"
 
+  # Ensure tooling and service exist before applying.
+  ensure_packages
+  ensure_zapret2_running
+
   local label
   case "${choice}" in
     1) label="Profile 1" ;;
@@ -263,7 +282,7 @@ apply_zapret2_profile() {
   fi
 
   backup_file_if_exists "/etc/zapret2.lua"
-  install -m 0644 "${tmp}" /etc/zapret2.lua
+  install_file 0644 "${tmp}" /etc/zapret2.lua
   rm -f "${tmp}"
 
   systemctl restart zapret2.service
@@ -278,6 +297,7 @@ apply_zapret2_profile() {
 
 select_and_apply_profile_menu() {
   ensure_storage
+  ensure_packages
 
   local current
   current="$(current_profile_name)"
@@ -525,7 +545,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/ssh -N -p ${foreign_ssh_port} -c aes128-gcm@openssh.com -o IPQoS=throughput -o TCPKeepAlive=yes -o PubkeyAuthentication=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=60 ${forward_flags} root@${foreign_ip}
+ExecStart=/usr/bin/ssh -N -p ${foreign_ssh_port} -c aes128-gcm@openssh.com -o IPQoS=throughput -o TCPKeepAlive=yes -o PubkeyAuthentication=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=60 -o ServerAliveCountMax=3 -o ConnectTimeout=10 -o BatchMode=yes ${forward_flags} root@${foreign_ip}
 Restart=always
 RestartSec=5
 
@@ -680,7 +700,7 @@ install_manager_command() {
   local current_source="${BASH_SOURCE[0]}"
 
   if [[ -f "${current_source}" && "${current_source}" != /dev/fd/* ]]; then
-    install -m 0755 "${current_source}" "${MANAGER_COMMAND}"
+    install_file 0755 "${current_source}" "${MANAGER_COMMAND}"
     log_success "Command installed. Run: ${MANAGER_COMMAND}"
     return 0
   fi
