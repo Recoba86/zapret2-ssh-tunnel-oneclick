@@ -82,6 +82,26 @@ typed_confirm() {
   [[ "${input}" == "${token}" ]]
 }
 
+iptables_remove_nfqueue_queue100_output() {
+  # Removes OUTPUT-chain rules that match our NFQUEUE usage (tcp dport -> queue 100).
+  # This avoids flushing the entire firewall on uninstall.
+  if ! command -v iptables >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local line
+  while IFS= read -r line; do
+    # Example:
+    #   -A OUTPUT -p tcp -m tcp --dport 22 -j NFQUEUE --queue-num 100
+    if [[ "${line}" == -A\ OUTPUT* ]] && [[ "${line}" == *"-p tcp"* ]] && [[ "${line}" == *"--dport "* ]] && [[ "${line}" == *"-j NFQUEUE"* ]] && [[ "${line}" == *"--queue-num ${NFQUEUE_NUM}"* ]]; then
+      local del
+      del="${line/-A OUTPUT/-D OUTPUT}"
+      # shellcheck disable=SC2086
+      iptables ${del} >/dev/null 2>&1 || true
+    fi
+  done < <(iptables -S OUTPUT 2>/dev/null || true)
+}
+
 pause_prompt() {
   read -r -p "Press Enter to continue... " _
 }
@@ -442,6 +462,58 @@ remove_all_tunnel_unit_files() {
   shopt -u nullglob
 
   systemctl daemon-reload
+}
+
+uninstall_flow() {
+  ensure_storage
+
+  log_warn "Uninstall will remove tunnel services, manager config, and optionally zapret2 config/service."
+  if ! typed_confirm "UNINSTALL-ALL" "This action is destructive and intended to fully clean this setup."; then
+    log_info "Uninstall canceled."
+    return 0
+  fi
+
+  if prompt_yes_no "Remove NFQUEUE iptables rules added by this manager (queue ${NFQUEUE_NUM})?" "y"; then
+    log_info "Removing NFQUEUE iptables rules from OUTPUT chain..."
+    iptables_remove_nfqueue_queue100_output
+    log_success "NFQUEUE iptables cleanup completed."
+  else
+    log_info "Skipping iptables changes."
+  fi
+
+  log_info "Stopping/disabling tunnel services..."
+  stop_disable_all_tunnel_units
+  remove_all_tunnel_unit_files
+  kill_existing_tunnel_processes
+
+  if prompt_yes_no "Stop/disable zapret2.service and remove /etc/zapret2.lua?" "y"; then
+    systemctl stop zapret2.service 2>/dev/null || true
+    systemctl disable zapret2.service 2>/dev/null || true
+
+    if [[ -f /etc/zapret2.lua ]]; then
+      backup_file_if_exists "/etc/zapret2.lua"
+      rm -f /etc/zapret2.lua
+    fi
+
+    # Best-effort: remove the zapret2 unit file if it exists as a standalone unit.
+    local frag
+    frag="$(systemctl show -p FragmentPath --value zapret2.service 2>/dev/null || true)"
+    if [[ -n "${frag}" && -f "${frag}" ]]; then
+      rm -f "${frag}"
+    fi
+
+    systemctl daemon-reload
+    log_success "zapret2 service/config cleanup completed."
+  else
+    log_info "Skipping zapret2 removal."
+  fi
+
+  log_info "Removing manager command and configuration..."
+  rm -f "${MANAGER_COMMAND}" 2>/dev/null || true
+  rm -rf "${CONFIG_DIR}" 2>/dev/null || true
+  rm -f /root/zapret2.tar.gz 2>/dev/null || true
+
+  log_success "Uninstall completed. System should be clean."
 }
 
 kill_existing_tunnel_processes() {
@@ -1395,6 +1467,7 @@ Options:
   --dashboard        Show the tunnel dashboard (summary + drill-down)
   --profile          Select/apply zapret2 profile (Profile 1/2/3 menu)
   --restart-all      Restart/rebuild all tunnel services
+  --uninstall        Uninstall everything created/managed by this script
   --install-command  Install/update ${MANAGER_COMMAND}
   -h, --help         Show this help
 HELP
@@ -1414,6 +1487,7 @@ show_main_menu() {
   echo "7) Tunnel dashboard (pretty status + details)"
   echo "8) Change Zapret2 profile (switch /etc/zapret2.lua)"
   echo "9) Install/update management command (${MANAGER_COMMAND})"
+  echo "10) Uninstall (remove everything managed by this script)"
   echo "0) Exit"
 }
 
@@ -1456,6 +1530,10 @@ run_menu() {
         ;;
       9)
         install_manager_command
+        pause_prompt
+        ;;
+      10)
+        uninstall_flow
         pause_prompt
         ;;
       0)
@@ -1501,6 +1579,9 @@ main() {
       ;;
     --restart-all)
       restart_all_tunnels
+      ;;
+    --uninstall)
+      uninstall_flow
       ;;
     --install-command)
       install_manager_command

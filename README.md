@@ -66,6 +66,7 @@ sudo ./setup_zapret2_tunnel.sh --edit
 sudo ./setup_zapret2_tunnel.sh --dashboard
 sudo ./setup_zapret2_tunnel.sh --profile
 sudo ./setup_zapret2_tunnel.sh --restart-all
+sudo ./setup_zapret2_tunnel.sh --uninstall
 sudo ./setup_zapret2_tunnel.sh --install-command
 ```
 
