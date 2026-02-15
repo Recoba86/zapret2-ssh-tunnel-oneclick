@@ -14,4 +14,4 @@ dpi_desync_fooling = "badseq"
 -- dpi_desync_fake_http = ""
 
 -- Standard MSS for better ping
-tcp_mss = 1320
+tcp_mss = 1300
