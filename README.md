@@ -74,11 +74,11 @@ Use menu option `6` (or `--dashboard`) to see a clean overview per tunnel, then 
 
 The manager can switch `/etc/zapret2.lua` between three profiles:
 
-- Profile 1: `fake.lua`
-- Profile 2: `split.lua`
-- Profile 3: `disorder.lua`
+- Profile 1: `scripts/fake.lua`
+- Profile 2: `scripts/split.lua`
+- Profile 3: `scripts/disorder.lua`
 
-The script will use a local file next to the script if available; otherwise it downloads from this repo’s raw files.
+The script will use a local file next to the script if available; otherwise it downloads from this repo’s raw files (it checks repo root and `/scripts/`).
 ## Naming
 
 When adding a tunnel, you choose a friendly name (examples: `Sweden`, `UK`, `Germany-1`).

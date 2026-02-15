@@ -210,6 +210,20 @@ profile_filename_for_choice() {
   esac
 }
 
+download_profile_file() {
+  # Tries repo root first, then /scripts/ (to match common layouts).
+  local filename="$1"
+  local dest="$2"
+
+  local url_root="${PROFILES_BASE_URL}/${filename}"
+  local url_scripts="${PROFILES_BASE_URL}/scripts/${filename}"
+
+  if download_to_file "${url_root}" "${dest}" 2>/dev/null; then
+    return 0
+  fi
+  download_to_file "${url_scripts}" "${dest}"
+}
+
 apply_zapret2_profile() {
   # Generic profile switching: copy a repo-hosted (or local) file to /etc/zapret2.lua and restart zapret2.
   local choice="$1"
@@ -234,10 +248,12 @@ apply_zapret2_profile() {
   if [[ -n "${src_dir}" && -f "${src_dir}/${filename}" ]]; then
     log_info "Using local profile file: ${src_dir}/${filename}"
     cp -f "${src_dir}/${filename}" "${tmp}"
+  elif [[ -n "${src_dir}" && -f "${src_dir}/scripts/${filename}" ]]; then
+    log_info "Using local profile file: ${src_dir}/scripts/${filename}"
+    cp -f "${src_dir}/scripts/${filename}" "${tmp}"
   else
-    local url="${PROFILES_BASE_URL}/${filename}"
-    log_info "Downloading profile from: ${url}"
-    download_to_file "${url}" "${tmp}"
+    log_info "Downloading profile (${filename}) from repository raw files..."
+    download_profile_file "${filename}" "${tmp}"
   fi
 
   if [[ ! -s "${tmp}" ]]; then
