@@ -28,9 +28,11 @@ log_error()   { echo -e "${C_RED}[ERROR]${C_RESET} $*" >&2; }
 # ---------- Constants ----------
 CONFIG_DIR="/etc/ssh-tunnel-manager"
 TARGETS_FILE="${CONFIG_DIR}/targets.conf"
+PROFILE_META_FILE="${CONFIG_DIR}/zapret2_profile"
 MANAGER_COMMAND="/usr/local/sbin/zapret2-tunnel"
 ZAPRET_ARCHIVE_URL="https://h4.linklick.ir/b7d0be65a9a3ddfe3fa03008b69680fc/zapret2.tar.gz"
 SELF_INSTALL_URL="https://raw.githubusercontent.com/Recoba86/zapret2-ssh-tunnel-oneclick/main/setup_zapret2_tunnel.sh"
+PROFILES_BASE_URL="https://raw.githubusercontent.com/Recoba86/zapret2-ssh-tunnel-oneclick/main"
 NFQUEUE_NUM="100"
 
 # targets.conf format (new):
@@ -67,8 +69,10 @@ ensure_root() {
 ensure_storage() {
   mkdir -p "${CONFIG_DIR}"
   touch "${TARGETS_FILE}"
+  touch "${PROFILE_META_FILE}"
   chmod 700 "${CONFIG_DIR}"
   chmod 600 "${TARGETS_FILE}"
+  chmod 600 "${PROFILE_META_FILE}"
 }
 
 trim() {
@@ -150,6 +154,135 @@ read_target_line() {
     # old format
     echo "${f1}|${f1}|${f2}|${f3}|${f4}"
   fi
+}
+
+script_dir() {
+  # Best-effort directory resolution (may be /dev/fd/* when run via process substitution).
+  local src="${BASH_SOURCE[0]}"
+  if [[ "${src}" == /dev/fd/* ]]; then
+    echo ""
+    return 0
+  fi
+  (cd -- "$(dirname -- "${src}")" && pwd)
+}
+
+download_to_file() {
+  local url="$1"
+  local dest="$2"
+
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "${url}" -o "${dest}"
+    return 0
+  fi
+  if command -v wget >/dev/null 2>&1; then
+    wget -qO "${dest}" "${url}"
+    return 0
+  fi
+
+  log_error "Neither curl nor wget is available to download ${url}"
+  return 1
+}
+
+backup_file_if_exists() {
+  local path="$1"
+  if [[ -f "${path}" ]]; then
+    local ts
+    ts="$(date +%Y%m%d-%H%M%S)"
+    cp -a "${path}" "${path}.bak.${ts}"
+  fi
+}
+
+current_profile_name() {
+  if [[ -s "${PROFILE_META_FILE}" ]]; then
+    cat "${PROFILE_META_FILE}" | head -n 1
+  else
+    echo "unknown"
+  fi
+}
+
+profile_filename_for_choice() {
+  local choice="$1"
+  case "${choice}" in
+    1) echo "fake.lua" ;;
+    2) echo "split.lua" ;;
+    3) echo "disorder.lua" ;;
+    *) return 1 ;;
+  esac
+}
+
+apply_zapret2_profile() {
+  # Generic profile switching: copy a repo-hosted (or local) file to /etc/zapret2.lua and restart zapret2.
+  local choice="$1"
+  local filename
+  filename="$(profile_filename_for_choice "${choice}")"
+
+  local label
+  case "${choice}" in
+    1) label="Profile 1" ;;
+    2) label="Profile 2" ;;
+    3) label="Profile 3" ;;
+  esac
+
+  local tmp
+  tmp="$(mktemp)"
+
+  local src_dir
+  src_dir="$(script_dir)"
+
+  log_info "Applying Zapret2 ${label} (${filename}) ..."
+
+  if [[ -n "${src_dir}" && -f "${src_dir}/${filename}" ]]; then
+    log_info "Using local profile file: ${src_dir}/${filename}"
+    cp -f "${src_dir}/${filename}" "${tmp}"
+  else
+    local url="${PROFILES_BASE_URL}/${filename}"
+    log_info "Downloading profile from: ${url}"
+    download_to_file "${url}" "${tmp}"
+  fi
+
+  if [[ ! -s "${tmp}" ]]; then
+    rm -f "${tmp}"
+    log_error "Downloaded/copied profile is empty: ${filename}"
+    return 1
+  fi
+
+  backup_file_if_exists "/etc/zapret2.lua"
+  install -m 0644 "${tmp}" /etc/zapret2.lua
+  rm -f "${tmp}"
+
+  systemctl restart zapret2.service
+
+  if systemctl is-active --quiet zapret2.service; then
+    echo "${label} (${filename})" > "${PROFILE_META_FILE}"
+    log_success "Zapret2 restarted. Active profile: ${label} (${filename})"
+  else
+    log_warn "zapret2.service is not active after restart. Check: systemctl status zapret2.service"
+  fi
+}
+
+select_and_apply_profile_menu() {
+  ensure_storage
+
+  local current
+  current="$(current_profile_name)"
+
+  echo
+  echo -e "${C_BOLD}Zapret2 Profile Selection${C_RESET}"
+  echo -e "Current: ${C_DIM}${current}${C_RESET}"
+  echo "1) Profile 1 (fake.lua)"
+  echo "2) Profile 2 (split.lua)"
+  echo "3) Profile 3 (disorder.lua)"
+  echo "0) Skip (keep current /etc/zapret2.lua)"
+
+  local choice
+  while true; do
+    read -r -p "Select a profile: " choice
+    case "${choice}" in
+      0) log_info "Skipped profile change."; return 0 ;;
+      1|2|3) apply_zapret2_profile "${choice}"; return 0 ;;
+      *) log_warn "Invalid option. Choose 0-3." ;;
+    esac
+  done
 }
 
 ensure_packages() {
@@ -570,6 +703,7 @@ initial_setup_flow() {
   : > "${TARGETS_FILE}"
 
   install_zapret2
+  select_and_apply_profile_menu
   add_target_flow
   install_manager_command
 
@@ -928,6 +1062,7 @@ Options:
   --initial-setup    Run initial setup flow directly
   --add-target       Add a new tunnel target directly
   --dashboard        Show the tunnel dashboard (summary + drill-down)
+  --profile          Select/apply zapret2 profile (Profile 1/2/3 menu)
   --restart-all      Restart/rebuild all tunnel services
   --install-command  Install/update ${MANAGER_COMMAND}
   -h, --help         Show this help
@@ -945,7 +1080,8 @@ show_main_menu() {
   echo "4) Remove a tunnel"
   echo "5) Restart/rebuild all tunnel services"
   echo "6) Tunnel dashboard (pretty status + details)"
-  echo "7) Install/update management command (${MANAGER_COMMAND})"
+  echo "7) Change Zapret2 profile (switch /etc/zapret2.lua)"
+  echo "8) Install/update management command (${MANAGER_COMMAND})"
   echo "0) Exit"
 }
 
@@ -979,6 +1115,10 @@ run_menu() {
         dashboard_flow
         ;;
       7)
+        select_and_apply_profile_menu
+        pause_prompt
+        ;;
+      8)
         install_manager_command
         pause_prompt
         ;;
@@ -1016,6 +1156,9 @@ main() {
       ;;
     --dashboard)
       dashboard_flow
+      ;;
+    --profile)
+      select_and_apply_profile_menu
       ;;
     --restart-all)
       restart_all_tunnels

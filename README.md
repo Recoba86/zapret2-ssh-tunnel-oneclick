@@ -42,7 +42,7 @@ wget -qO- https://raw.githubusercontent.com/Recoba86/zapret2-ssh-tunnel-oneclick
 
 ## Install Persistent Command
 
-From inside the menu choose option `7`, or run directly:
+From inside the menu choose option `8`, or run directly:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Recoba86/zapret2-ssh-tunnel-oneclick/main/setup_zapret2_tunnel.sh) --install-command
@@ -61,6 +61,7 @@ sudo ./setup_zapret2_tunnel.sh --menu
 sudo ./setup_zapret2_tunnel.sh --initial-setup
 sudo ./setup_zapret2_tunnel.sh --add-target
 sudo ./setup_zapret2_tunnel.sh --dashboard
+sudo ./setup_zapret2_tunnel.sh --profile
 sudo ./setup_zapret2_tunnel.sh --restart-all
 sudo ./setup_zapret2_tunnel.sh --install-command
 ```
@@ -69,6 +70,15 @@ sudo ./setup_zapret2_tunnel.sh --install-command
 
 Use menu option `6` (or `--dashboard`) to see a clean overview per tunnel, then select a tunnel to view details.
 
+## Zapret2 Profiles
+
+The manager can switch `/etc/zapret2.lua` between three profiles:
+
+- Profile 1: `fake.lua`
+- Profile 2: `split.lua`
+- Profile 3: `disorder.lua`
+
+The script will use a local file next to the script if available; otherwise it downloads from this repo’s raw files.
 ## Naming
 
 When adding a tunnel, you choose a friendly name (examples: `Sweden`, `UK`, `Germany-1`).
