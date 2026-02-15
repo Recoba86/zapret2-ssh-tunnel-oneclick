@@ -1,66 +1,88 @@
 # Zapret2 SSH Tunnel One-Click
 
-Automated, interactive Bash installer for setting up an obfuscated SSH local-forward tunnel on Ubuntu/Debian servers using `zapret2`.
+Menu-driven Bash manager for building and maintaining obfuscated SSH tunnels on Ubuntu/Debian with `zapret2`.
+
+## What is new
+
+- Multi-target tunneling support
+- Different local ports can tunnel to different foreign servers
+- One `systemd` unit per target (`ssh-tunnel-<name>.service`)
+- Persistent management menu you can open anytime
+- Add/remove/list/restart targets without reinstalling everything
 
 ## Features
 
-- Interactive setup wizard (IP, SSH port, password, forwarding ports)
-- Root check and dependency installation (`sshpass`, `curl`, `wget`, `net-tools`)
-- Full `iptables` cleanup (filter/nat/mangle) and reset to ACCEPT policies
-- Stops and disables existing `zapret2` / `ssh-tunnel` services
-- Kills existing SSH tunnel processes safely
-- Installs and enables `zapret2` service
-- Adds NFQUEUE rule for SSH traffic obfuscation
-- Generates SSH ed25519 key automatically (if missing)
-- Configures passwordless SSH login via `ssh-copy-id` + `sshpass`
-- Creates resilient `systemd` service for persistent SSH tunnel
-- Final verification with `systemctl status` and `netstat`
+- Interactive menu for setup and lifecycle management
+- Root check and package automation (`sshpass`, `curl`, `wget`, `net-tools`, `openssh-client` if needed)
+- Optional destructive initial setup (iptables flush/reset + service cleanup)
+- Zapret2 install/start automation
+- NFQUEUE rule automation per SSH destination port
+- SSH key creation + optional `ssh-copy-id` automation
+- End-to-end service and listening-port verification
 
 ## Requirements
 
-- OS: Ubuntu/Debian
-- Access: `root`
-- Remote server reachable via SSH
+- Ubuntu/Debian server
+- Root access
+- Reachable foreign SSH servers
 
-## Quick Install (One Command)
-
-Run on your Iranian server as root:
+## Quick Run (Menu)
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Recoba86/zapret2-ssh-tunnel-oneclick/main/setup_zapret2_tunnel.sh)
 ```
 
-If `curl` is unavailable:
+Alternative with `wget`:
 
 ```bash
 wget -qO- https://raw.githubusercontent.com/Recoba86/zapret2-ssh-tunnel-oneclick/main/setup_zapret2_tunnel.sh | bash
 ```
 
-## Manual Usage
+## Install Persistent Command
+
+From inside the menu choose option `7`, or run directly:
 
 ```bash
-chmod +x setup_zapret2_tunnel.sh
-sudo ./setup_zapret2_tunnel.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/Recoba86/zapret2-ssh-tunnel-oneclick/main/setup_zapret2_tunnel.sh) --install-command
 ```
 
-## What the script configures
+Then you can always open the manager using:
 
-- `zapret2` service
-- `ssh-tunnel.service` at:
-  - `/etc/systemd/system/ssh-tunnel.service`
-- SSH local forwards in the form:
-  - `-L 0.0.0.0:PORT:localhost:PORT`
+```bash
+sudo zapret2-tunnel
+```
+
+## Direct Modes
+
+```bash
+sudo ./setup_zapret2_tunnel.sh --menu
+sudo ./setup_zapret2_tunnel.sh --initial-setup
+sudo ./setup_zapret2_tunnel.sh --add-target
+sudo ./setup_zapret2_tunnel.sh --status
+sudo ./setup_zapret2_tunnel.sh --install-command
+```
+
+## Multi-Server Mapping Example
+
+- Local port `31` -> Sweden server
+- Local port `32` -> UK server
+- Local port `4000` -> Germany server
+
+Add each target from menu option `2` with its own server IP, SSH port, and local port list.
+
+## Managed Files
+
+- Main script: `setup_zapret2_tunnel.sh`
+- Mirror copy: `scripts/setup_zapret2_tunnel.sh`
+- Config store: `/etc/ssh-tunnel-manager/targets.conf`
+- Tunnel units: `/etc/systemd/system/ssh-tunnel-<name>.service`
+- Manager command: `/usr/local/sbin/zapret2-tunnel`
 
 ## Security Notes
 
-- The script briefly uses the remote root password only for `ssh-copy-id`.
-- It unsets the password variable after key deployment.
-- You should disable password login for SSH on the remote server after setup.
-
-## Files
-
-- `setup_zapret2_tunnel.sh` (main executable script)
-- `scripts/setup_zapret2_tunnel.sh` (copy for structured repos)
+- Root passwords are only used for `ssh-copy-id` when you choose that option.
+- Password variables are unset after key copy.
+- For hardening, disable password SSH login on foreign servers after key setup.
 
 ## License
 
