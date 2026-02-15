@@ -828,8 +828,58 @@ WantedBy=multi-user.target
 UNIT
 
   systemctl daemon-reload
-  systemctl enable "${unit_name}"
-  systemctl restart "${unit_name}"
+}
+
+start_target_unit() {
+  local key="$1"
+  local unit
+  unit="$(service_name_for_target "${key}")"
+  systemctl start "${unit}" 2>/dev/null || true
+}
+
+restart_target_unit() {
+  local key="$1"
+  local unit
+  unit="$(service_name_for_target "${key}")"
+  systemctl restart "${unit}" 2>/dev/null || true
+}
+
+enable_target_unit() {
+  local key="$1"
+  local unit
+  unit="$(service_name_for_target "${key}")"
+  systemctl enable "${unit}" 2>/dev/null || true
+}
+
+disable_target_unit() {
+  local key="$1"
+  local unit
+  unit="$(service_name_for_target "${key}")"
+  systemctl disable "${unit}" 2>/dev/null || true
+}
+
+unit_enabled_state() {
+  # Returns: enabled|disabled|other
+  local unit="$1"
+  local st
+  st="$(systemctl is-enabled "${unit}" 2>/dev/null || true)"
+  case "${st}" in
+    enabled) echo "enabled" ;;
+    disabled) echo "disabled" ;;
+    *) echo "other" ;;
+  esac
+}
+
+unit_active_state() {
+  # Returns: active|inactive|other
+  local unit="$1"
+  local st
+  st="$(systemctl is-active "${unit}" 2>/dev/null || true)"
+  case "${st}" in
+    active) echo "active" ;;
+    inactive) echo "inactive" ;;
+    *) echo "other" ;;
+  esac
 }
 
 append_target_config() {
@@ -972,6 +1022,7 @@ add_target_flow() {
   append_target_config "${TARGET_KEY}" "${TARGET_LABEL}" "${TARGET_IP}" "${TARGET_SSH_PORT}" "${TARGET_BIND_ADDR}" "${TARGET_PORTS_CSV}"
   ensure_nfqueue_rule "${TARGET_SSH_PORT}"
   write_target_service "${TARGET_KEY}" "${TARGET_IP}" "${TARGET_SSH_PORT}" "${TARGET_BIND_ADDR}" "${TARGET_PORTS_CSV}"
+  systemctl enable --now "$(service_name_for_target "${TARGET_KEY}")" 2>/dev/null || true
 
   log_success "Tunnel '${TARGET_LABEL}' added with ports: ${TARGET_PORTS[*]}"
 }
@@ -1238,6 +1289,10 @@ edit_tunnel_flow() {
   local new_unit
   new_unit="$(service_name_for_target "${new_key}")"
 
+  local old_enabled old_active
+  old_enabled="$(unit_enabled_state "${old_unit}")"
+  old_active="$(unit_active_state "${old_unit}")"
+
   echo
   log_info "Planned changes:"
   echo "  Name:  ${old_label} -> ${new_label}"
@@ -1274,6 +1329,16 @@ edit_tunnel_flow() {
 
   write_target_service "${new_key}" "${new_ip}" "${new_ssh_port}" "${new_bind}" "${new_ports_csv}"
 
+  # Restore enabled/active state from the old unit.
+  if [[ "${old_enabled}" == "enabled" ]]; then
+    systemctl enable "${new_unit}" >/dev/null 2>&1 || true
+  else
+    systemctl disable "${new_unit}" >/dev/null 2>&1 || true
+  fi
+  if [[ "${old_active}" == "active" ]]; then
+    systemctl start "${new_unit}" >/dev/null 2>&1 || true
+  fi
+
   if systemctl is-active --quiet "${new_unit}"; then
     log_success "Tunnel updated: ${new_label} (${new_unit})"
   else
@@ -1300,8 +1365,29 @@ restart_all_tunnels() {
     local k l ip sp bind pc
     IFS='|' read -r k l ip sp bind pc <<<"${parsed}"
 
-    ensure_nfqueue_rule "${sp}"
+    # Only ensure NFQUEUE when a tunnel is enabled or currently active.
+    local unit
+    unit="$(service_name_for_target "${k}")"
+    local en act
+    en="$(unit_enabled_state "${unit}")"
+    act="$(unit_active_state "${unit}")"
+    if [[ "${en}" == "enabled" || "${act}" == "active" ]]; then
+      ensure_nfqueue_rule "${sp}"
+    fi
+
     write_target_service "${k}" "${ip}" "${sp}" "${bind}" "${pc}"
+
+    # Preserve enabled/active state.
+    if [[ "${en}" == "enabled" ]]; then
+      systemctl enable "${unit}" >/dev/null 2>&1 || true
+    else
+      systemctl disable "${unit}" >/dev/null 2>&1 || true
+    fi
+
+    if [[ "${act}" == "active" ]]; then
+      systemctl restart "${unit}" >/dev/null 2>&1 || true
+    fi
+
     restarted=$((restarted + 1))
   done < "${TARGETS_FILE}"
 
