@@ -36,7 +36,7 @@ PROFILES_BASE_URL="https://raw.githubusercontent.com/Recoba86/zapret2-ssh-tunnel
 NFQUEUE_NUM="100"
 
 # targets.conf format (new):
-#   key|label|foreign_ip|foreign_ssh_port|ports_csv
+#   key|label|foreign_ip|foreign_ssh_port|bind_addr|ports_csv
 # Backward compatible (old):
 #   key|foreign_ip|foreign_ssh_port|ports_csv
 
@@ -68,6 +68,18 @@ install_file() {
 
   cp -f "${src}" "${dest}"
   chmod "${mode}" "${dest}"
+}
+
+typed_confirm() {
+  # Require an exact confirmation token to proceed with destructive actions.
+  local token="$1"
+  local prompt="$2"
+  local input=""
+
+  echo
+  echo -e "${C_YELLOW}${prompt}${C_RESET}"
+  read -r -p "Type '${token}' to confirm: " input
+  [[ "${input}" == "${token}" ]]
 }
 
 pause_prompt() {
@@ -115,6 +127,11 @@ validate_port() {
   (( port >= 1 && port <= 65535 ))
 }
 
+validate_bind_addr() {
+  local addr="$1"
+  [[ "${addr}" == "127.0.0.1" || "${addr}" == "0.0.0.0" ]]
+}
+
 prompt_yes_no() {
   local prompt="$1"
   local default="${2:-y}"
@@ -158,16 +175,27 @@ service_name_for_target() {
 }
 
 read_target_line() {
-  # Input: a single line (pipe-separated). Output: key|label|ip|ssh_port|ports_csv
+  # Input: a single line (pipe-separated). Output: key|label|ip|ssh_port|bind_addr|ports_csv
   local line="$1"
-  local f1 f2 f3 f4 f5
-  IFS='|' read -r f1 f2 f3 f4 f5 <<<"${line}"
+  local f1 f2 f3 f4 f5 f6
+  IFS='|' read -r f1 f2 f3 f4 f5 f6 <<<"${line}"
 
+  # v2 format: key|label|ip|ssh_port|bind_addr|ports_csv
+  if [[ -n "${f6}" ]]; then
+    local bind="${f5}"
+    if ! validate_bind_addr "${bind}"; then
+      bind="0.0.0.0"
+    fi
+    echo "${f1}|${f2}|${f3}|${f4}|${bind}|${f6}"
+    return 0
+  fi
+
+  # v1 format: key|label|ip|ssh_port|ports_csv
   if [[ -n "${f5}" ]]; then
-    echo "${f1}|${f2}|${f3}|${f4}|${f5}"
+    echo "${f1}|${f2}|${f3}|${f4}|0.0.0.0|${f5}"
   else
-    # old format
-    echo "${f1}|${f1}|${f2}|${f3}|${f4}"
+    # old format: key|ip|ssh_port|ports_csv
+    echo "${f1}|${f1}|${f2}|${f3}|0.0.0.0|${f4}"
   fi
 }
 
@@ -321,6 +349,32 @@ select_and_apply_profile_menu() {
   done
 }
 
+prompt_bind_address() {
+  local default="${1:-127.0.0.1}"
+  local choice
+
+  echo
+  echo -e "${C_BOLD}Bind Address For Local Forwards${C_RESET}"
+  echo "1) 127.0.0.1  (Recommended: only local access)"
+  echo "2) 0.0.0.0    (Public: listen on all interfaces)"
+
+  while true; do
+    if [[ "${default}" == "0.0.0.0" ]]; then
+      read -r -p "Select [1-2] (default 2): " choice
+      choice="${choice:-2}"
+    else
+      read -r -p "Select [1-2] (default 1): " choice
+      choice="${choice:-1}"
+    fi
+
+    case "${choice}" in
+      1) echo "127.0.0.1"; return 0 ;;
+      2) echo "0.0.0.0"; return 0 ;;
+      *) log_warn "Invalid selection." ;;
+    esac
+  done
+}
+
 ensure_packages() {
   local -a missing=()
 
@@ -393,11 +447,12 @@ remove_all_tunnel_unit_files() {
 kill_existing_tunnel_processes() {
   log_info "Killing existing SSH tunnel processes..."
   local pids
-  pids="$(pgrep -f 'ssh .* -N .* -L 0\.0\.0\.0:' || true)"
+  # Match typical local-forward tunnels (bind address can vary).
+  pids="$(pgrep -f 'ssh .* -N .* -L [0-9.]+:[0-9]+:localhost:' || true)"
   if [[ -n "${pids}" ]]; then
     kill ${pids} || true
     sleep 1
-    pids="$(pgrep -f 'ssh .* -N .* -L 0\.0\.0\.0:' || true)"
+    pids="$(pgrep -f 'ssh .* -N .* -L [0-9.]+:[0-9]+:localhost:' || true)"
     [[ -z "${pids}" ]] || kill -9 ${pids} || true
     log_success "Existing SSH tunnel processes terminated."
   else
@@ -446,8 +501,8 @@ ssh_port_used_by_any_target() {
     [[ -n "${line}" ]] || continue
     local parsed
     parsed="$(read_target_line "${line}")"
-    local _key _label _ip _ssh_port _ports
-    IFS='|' read -r _key _label _ip _ssh_port _ports <<<"${parsed}"
+    local _key _label _ip _ssh_port _bind _ports
+    IFS='|' read -r _key _label _ip _ssh_port _bind _ports <<<"${parsed}"
     [[ "${_ssh_port}" == "${ssh_port}" ]] && return 0
   done < "${TARGETS_FILE}"
   return 1
@@ -497,8 +552,8 @@ port_in_use_by_other_target() {
     [[ -n "${line}" ]] || continue
     local parsed
     parsed="$(read_target_line "${line}")"
-    local _key _label _ip _ssh_port ports_csv
-    IFS='|' read -r _key _label _ip _ssh_port ports_csv <<<"${parsed}"
+    local _key _label _ip _ssh_port _bind ports_csv
+    IFS='|' read -r _key _label _ip _ssh_port _bind ports_csv <<<"${parsed}"
 
     local -a ports_arr=()
     IFS=',' read -r -a ports_arr <<<"${ports_csv}"
@@ -511,15 +566,74 @@ port_in_use_by_other_target() {
   return 1
 }
 
+port_in_use_by_other_target_excluding() {
+  local exclude_key="$1"
+  local query_port="$2"
+  local line
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    local parsed
+    parsed="$(read_target_line "${line}")"
+    local _key _label _ip _ssh_port _bind ports_csv
+    IFS='|' read -r _key _label _ip _ssh_port _bind ports_csv <<<"${parsed}"
+
+    [[ "${_key}" == "${exclude_key}" ]] && continue
+
+    local -a ports_arr=()
+    IFS=',' read -r -a ports_arr <<<"${ports_csv}"
+    local p
+    for p in "${ports_arr[@]}"; do
+      [[ "${p}" == "${query_port}" ]] && return 0
+    done
+  done < "${TARGETS_FILE}"
+
+  return 1
+}
+
+replace_target_line_in_config() {
+  # Replace the line matching key with a fully specified v2 line.
+  local old_key="$1"
+  local new_line="$2"
+
+  awk -F'|' -v k="${old_key}" -v nl="${new_line}" 'BEGIN{OFS="|"} $1==k {$0=nl} {print}' "${TARGETS_FILE}" > "${TARGETS_FILE}.tmp"
+  mv "${TARGETS_FILE}.tmp" "${TARGETS_FILE}"
+}
+
+select_target_index() {
+  # Populates arrays and returns selected index in SELECTED_IDX.
+  ensure_storage
+  if [[ ! -s "${TARGETS_FILE}" ]]; then
+    log_warn "No tunnels configured yet."
+    return 1
+  fi
+
+  list_targets_basic
+  collect_targets_arrays
+
+  local choice
+  while true; do
+    read -r -p "Select a tunnel number (0 to cancel): " choice
+    if [[ "${choice}" =~ ^[0-9]+$ ]] && (( choice == 0 )); then
+      return 1
+    fi
+    if [[ "${choice}" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#T_KEYS[@]} )); then
+      SELECTED_IDX=$((choice - 1))
+      return 0
+    fi
+    log_warn "Invalid selection."
+  done
+}
+
 build_forward_flags() {
-  local ports_csv="$1"
+  local bind_addr="$1"
+  local ports_csv="$2"
   local -a ports_arr=()
   local flags=""
   local p
 
   IFS=',' read -r -a ports_arr <<<"${ports_csv}"
   for p in "${ports_arr[@]}"; do
-    flags+="-L 0.0.0.0:${p}:localhost:${p} "
+    flags+="-L ${bind_addr}:${p}:localhost:${p} "
   done
 
   flags="${flags% }"
@@ -530,12 +644,13 @@ write_target_service() {
   local target_key="$1"
   local foreign_ip="$2"
   local foreign_ssh_port="$3"
-  local ports_csv="$4"
+  local bind_addr="$4"
+  local ports_csv="$5"
   local unit_name
   local forward_flags
 
   unit_name="$(service_name_for_target "${target_key}")"
-  forward_flags="$(build_forward_flags "${ports_csv}")"
+  forward_flags="$(build_forward_flags "${bind_addr}" "${ports_csv}")"
 
   cat > "/etc/systemd/system/${unit_name}" <<UNIT
 [Unit]
@@ -563,12 +678,17 @@ append_target_config() {
   local target_label="$2"
   local foreign_ip="$3"
   local foreign_ssh_port="$4"
-  local ports_csv="$5"
+  local bind_addr="$5"
+  local ports_csv="$6"
 
   # Disallow '|' in label
   target_label="${target_label//|/}"
 
-  echo "${target_key}|${target_label}|${foreign_ip}|${foreign_ssh_port}|${ports_csv}" >> "${TARGETS_FILE}"
+  if ! validate_bind_addr "${bind_addr}"; then
+    bind_addr="127.0.0.1"
+  fi
+
+  echo "${target_key}|${target_label}|${foreign_ip}|${foreign_ssh_port}|${bind_addr}|${ports_csv}" >> "${TARGETS_FILE}"
 }
 
 prompt_target_details() {
@@ -621,6 +741,8 @@ prompt_target_details() {
     log_error "Invalid SSH port: ${TARGET_SSH_PORT}"
     exit 1
   fi
+
+  TARGET_BIND_ADDR="$(prompt_bind_address "127.0.0.1")"
 
   while true; do
     read -r -a TARGET_PORTS -p "Enter local ports for this tunnel (space-separated, e.g. 31 32 4000): "
@@ -688,9 +810,9 @@ add_target_flow() {
     log_warn "Skipped ssh-copy-id. Make sure key-based auth is already configured."
   fi
 
-  append_target_config "${TARGET_KEY}" "${TARGET_LABEL}" "${TARGET_IP}" "${TARGET_SSH_PORT}" "${TARGET_PORTS_CSV}"
+  append_target_config "${TARGET_KEY}" "${TARGET_LABEL}" "${TARGET_IP}" "${TARGET_SSH_PORT}" "${TARGET_BIND_ADDR}" "${TARGET_PORTS_CSV}"
   ensure_nfqueue_rule "${TARGET_SSH_PORT}"
-  write_target_service "${TARGET_KEY}" "${TARGET_IP}" "${TARGET_SSH_PORT}" "${TARGET_PORTS_CSV}"
+  write_target_service "${TARGET_KEY}" "${TARGET_IP}" "${TARGET_SSH_PORT}" "${TARGET_BIND_ADDR}" "${TARGET_PORTS_CSV}"
 
   log_success "Tunnel '${TARGET_LABEL}' added with ports: ${TARGET_PORTS[*]}"
 }
@@ -719,7 +841,7 @@ install_manager_command() {
 }
 
 initial_setup_flow() {
-  log_warn "Initial setup will flush iptables and recreate all managed tunnel services."
+  log_warn "Initial setup can optionally reset iptables and will recreate managed tunnel services."
   if ! prompt_yes_no "Continue with initial setup?" "n"; then
     log_info "Initial setup canceled."
     return 0
@@ -727,7 +849,16 @@ initial_setup_flow() {
 
   ensure_storage
   ensure_packages
-  reset_iptables
+
+  if prompt_yes_no "Reset iptables rules to ACCEPT (destructive)?" "n"; then
+    if typed_confirm "RESET-IPTABLES" "This will FLUSH filter/nat/mangle tables and set policies to ACCEPT."; then
+      reset_iptables
+    else
+      log_warn "Typed confirmation did not match. Skipping iptables reset."
+    fi
+  else
+    log_info "Skipping iptables changes (safe path)."
+  fi
 
   systemctl stop zapret2.service 2>/dev/null || true
   systemctl disable zapret2.service 2>/dev/null || true
@@ -747,11 +878,12 @@ initial_setup_flow() {
 }
 
 collect_targets_arrays() {
-  # Outputs global arrays: T_KEYS, T_LABELS, T_IPS, T_SSH_PORTS, T_PORTS_CSV
+  # Outputs global arrays: T_KEYS, T_LABELS, T_IPS, T_SSH_PORTS, T_BINDS, T_PORTS_CSV
   T_KEYS=()
   T_LABELS=()
   T_IPS=()
   T_SSH_PORTS=()
+  T_BINDS=()
   T_PORTS_CSV=()
 
   local line
@@ -761,12 +893,14 @@ collect_targets_arrays() {
     parsed="$(read_target_line "${line}")"
 
     local k l ip sp pc
-    IFS='|' read -r k l ip sp pc <<<"${parsed}"
+    local bind
+    IFS='|' read -r k l ip sp bind pc <<<"${parsed}"
 
     T_KEYS+=("${k}")
     T_LABELS+=("${l}")
     T_IPS+=("${ip}")
     T_SSH_PORTS+=("${sp}")
+    T_BINDS+=("${bind}")
     T_PORTS_CSV+=("${pc}")
   done < "${TARGETS_FILE}"
 }
@@ -782,12 +916,12 @@ list_targets_basic() {
   collect_targets_arrays
 
   printf "\n${C_BOLD}Configured Tunnel Targets${C_RESET}\n"
-  printf "%-4s %-20s %-14s %-17s %-9s %s\n" "#" "NAME" "KEY" "FOREIGN_IP" "SSH_PORT" "PORTS"
-  printf "%-4s %-20s %-14s %-17s %-9s %s\n" "--" "--------------------" "--------------" "-----------------" "---------" "----------------"
+  printf "%-4s %-18s %-14s %-17s %-9s %-9s %s\n" "#" "NAME" "KEY" "FOREIGN_IP" "SSH_PORT" "BIND" "PORTS"
+  printf "%-4s %-18s %-14s %-17s %-9s %-9s %s\n" "--" "------------------" "--------------" "-----------------" "---------" "---------" "----------------"
 
   local i
   for ((i=0; i<${#T_KEYS[@]}; i++)); do
-    printf "%-4s %-20s %-14s %-17s %-9s %s\n" "$((i+1))" "${T_LABELS[$i]}" "${T_KEYS[$i]}" "${T_IPS[$i]}" "${T_SSH_PORTS[$i]}" "${T_PORTS_CSV[$i]//,/ }"
+    printf "%-4s %-18s %-14s %-17s %-9s %-9s %s\n" "$((i+1))" "${T_LABELS[$i]:0:18}" "${T_KEYS[$i]}" "${T_IPS[$i]}" "${T_SSH_PORTS[$i]}" "${T_BINDS[$i]}" "${T_PORTS_CSV[$i]//,/ }"
   done
   echo
 }
@@ -800,22 +934,14 @@ remove_target_flow() {
     return 0
   fi
 
-  list_targets_basic
-  collect_targets_arrays
+  if ! select_target_index; then
+    log_info "Canceled."
+    return 0
+  fi
 
-  local choice
-  while true; do
-    read -r -p "Enter target number to remove: " choice
-    if [[ "${choice}" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#T_KEYS[@]} )); then
-      break
-    fi
-    log_warn "Invalid selection."
-  done
-
-  local idx=$((choice - 1))
-  local target_key="${T_KEYS[${idx}]}"
-  local target_label="${T_LABELS[${idx}]}"
-  local target_ssh_port="${T_SSH_PORTS[${idx}]}"
+  local target_key="${T_KEYS[${SELECTED_IDX}]}"
+  local target_label="${T_LABELS[${SELECTED_IDX}]}"
+  local target_ssh_port="${T_SSH_PORTS[${SELECTED_IDX}]}"
   local unit_name
   unit_name="$(service_name_for_target "${target_key}")"
 
@@ -830,6 +956,170 @@ remove_target_flow() {
   remove_nfqueue_rule_if_unused "${target_ssh_port}"
 
   log_success "Tunnel '${target_label}' removed."
+}
+
+edit_tunnel_flow() {
+  ensure_storage
+  ensure_packages
+
+  if ! select_target_index; then
+    log_info "Canceled."
+    return 0
+  fi
+
+  local old_key="${T_KEYS[${SELECTED_IDX}]}"
+  local old_label="${T_LABELS[${SELECTED_IDX}]}"
+  local old_ip="${T_IPS[${SELECTED_IDX}]}"
+  local old_ssh_port="${T_SSH_PORTS[${SELECTED_IDX}]}"
+  local old_bind="${T_BINDS[${SELECTED_IDX}]}"
+  local old_ports_csv="${T_PORTS_CSV[${SELECTED_IDX}]}"
+
+  local new_label="${old_label}"
+  local new_key="${old_key}"
+  local new_ip="${old_ip}"
+  local new_ssh_port="${old_ssh_port}"
+  local new_bind="${old_bind}"
+  local new_ports_csv="${old_ports_csv}"
+
+  echo
+  echo -e "${C_BOLD}Edit Tunnel${C_RESET}"
+  echo "Leave fields empty to keep current values."
+  echo
+
+  local input=""
+
+  read -r -p "Display name [${old_label}]: " input
+  input="$(trim "${input}")"
+  if [[ -n "${input}" ]]; then
+    input="$(echo "${input}" | tr -s '[:space:]' ' ')"
+    if (( ${#input} < 2 || ${#input} > 32 )); then
+      log_warn "Name must be 2-32 characters. Keeping current."
+    elif [[ "${input}" =~ [^A-Za-z0-9_-[:space:]] ]]; then
+      log_warn "Name contains invalid characters. Keeping current."
+    else
+      new_label="${input}"
+      local derived
+      derived="$(sanitize_key "${new_label}")"
+      if [[ "${derived}" != "${old_key}" ]]; then
+        if ! target_exists "${derived}"; then
+          if prompt_yes_no "Also change key from '${old_key}' to '${derived}' (affects systemd unit name)?" "y"; then
+            new_key="${derived}"
+          fi
+        else
+          log_warn "Derived key '${derived}' already exists. Keeping key '${old_key}'."
+        fi
+      fi
+    fi
+  fi
+
+  read -r -p "Foreign server IP [${old_ip}]: " input
+  input="$(trim "${input}")"
+  if [[ -n "${input}" ]]; then
+    if validate_ipv4 "${input}"; then
+      new_ip="${input}"
+    else
+      log_warn "Invalid IP. Keeping current."
+    fi
+  fi
+
+  read -r -p "Foreign SSH port [${old_ssh_port}]: " input
+  input="$(trim "${input}")"
+  if [[ -n "${input}" ]]; then
+    if validate_port "${input}"; then
+      new_ssh_port="${input}"
+    else
+      log_warn "Invalid SSH port. Keeping current."
+    fi
+  fi
+
+  new_bind="$(prompt_bind_address "${old_bind}")"
+
+  read -r -p "Local ports (space-separated) [${old_ports_csv//,/ }]: " input
+  input="$(trim "${input}")"
+  if [[ -n "${input}" ]]; then
+    local -a ports=()
+    read -r -a ports <<<"${input}"
+
+    if [[ ${#ports[@]} -eq 0 ]]; then
+      log_warn "No ports provided. Keeping current."
+    else
+      local -A seen=()
+      local -a cleaned=()
+      local p
+      local ok="yes"
+      for p in "${ports[@]}"; do
+        if ! validate_port "${p}"; then
+          log_warn "Invalid port: ${p}. Keeping current."
+          ok="no"
+          break
+        fi
+        if [[ -n "${seen["${p}"]+x}" ]]; then
+          log_warn "Duplicate port: ${p}. Keeping current."
+          ok="no"
+          break
+        fi
+        if port_in_use_by_other_target_excluding "${old_key}" "${p}"; then
+          log_warn "Port ${p} is assigned to another tunnel. Keeping current."
+          ok="no"
+          break
+        fi
+        seen["${p}"]=1
+        cleaned+=("${p}")
+      done
+
+      if [[ "${ok}" == "yes" ]]; then
+        new_ports_csv="$(IFS=','; echo "${cleaned[*]}")"
+      fi
+    fi
+  fi
+
+  local old_unit
+  old_unit="$(service_name_for_target "${old_key}")"
+
+  local new_unit
+  new_unit="$(service_name_for_target "${new_key}")"
+
+  echo
+  log_info "Planned changes:"
+  echo "  Name:  ${old_label} -> ${new_label}"
+  echo "  Key:   ${old_key} -> ${new_key}"
+  echo "  Host:  ${old_ip}:${old_ssh_port} -> ${new_ip}:${new_ssh_port}"
+  echo "  Bind:  ${old_bind} -> ${new_bind}"
+  echo "  Ports: ${old_ports_csv//,/ } -> ${new_ports_csv//,/ }"
+
+  if ! prompt_yes_no "Apply changes now?" "y"; then
+    log_info "No changes applied."
+    return 0
+  fi
+
+  systemctl stop "${old_unit}" 2>/dev/null || true
+  systemctl disable "${old_unit}" 2>/dev/null || true
+  rm -f "/etc/systemd/system/${old_unit}"
+
+  if [[ "${new_key}" != "${old_key}" ]]; then
+    awk -F'|' -v n="${old_key}" '$1 != n' "${TARGETS_FILE}" > "${TARGETS_FILE}.tmp"
+    mv "${TARGETS_FILE}.tmp" "${TARGETS_FILE}"
+    append_target_config "${new_key}" "${new_label}" "${new_ip}" "${new_ssh_port}" "${new_bind}" "${new_ports_csv}"
+  else
+    local newline
+    newline="${new_key}|${new_label//|/}|${new_ip}|${new_ssh_port}|${new_bind}|${new_ports_csv}"
+    replace_target_line_in_config "${old_key}" "${newline}"
+  fi
+
+  systemctl daemon-reload
+
+  ensure_nfqueue_rule "${new_ssh_port}"
+  if [[ "${new_ssh_port}" != "${old_ssh_port}" ]]; then
+    remove_nfqueue_rule_if_unused "${old_ssh_port}"
+  fi
+
+  write_target_service "${new_key}" "${new_ip}" "${new_ssh_port}" "${new_bind}" "${new_ports_csv}"
+
+  if systemctl is-active --quiet "${new_unit}"; then
+    log_success "Tunnel updated: ${new_label} (${new_unit})"
+  else
+    log_warn "Updated service is not active. Check: systemctl status ${new_unit}"
+  fi
 }
 
 restart_all_tunnels() {
@@ -848,11 +1138,11 @@ restart_all_tunnels() {
     local parsed
     parsed="$(read_target_line "${line}")"
 
-    local k l ip sp pc
-    IFS='|' read -r k l ip sp pc <<<"${parsed}"
+    local k l ip sp bind pc
+    IFS='|' read -r k l ip sp bind pc <<<"${parsed}"
 
     ensure_nfqueue_rule "${sp}"
-    write_target_service "${k}" "${ip}" "${sp}" "${pc}"
+    write_target_service "${k}" "${ip}" "${sp}" "${bind}" "${pc}"
     restarted=$((restarted + 1))
   done < "${TARGETS_FILE}"
 
@@ -945,9 +1235,12 @@ dashboard_table() {
 
   collect_targets_arrays
 
+  local zp
+  zp="$(current_profile_name)"
+
   printf "\n${C_BOLD}Tunnel Dashboard${C_RESET}\n"
-  printf "%-4s %-18s %-12s %-16s %-8s %-15s %-8s %-9s %s\n" "#" "NAME" "KEY" "FOREIGN_IP" "SSH" "PORTS" "SVC" "LISTEN" "SSH"
-  printf "%-4s %-18s %-12s %-16s %-8s %-15s %-8s %-9s %s\n" "--" "------------------" "------------" "----------------" "------" "---------------" "------" "---------" "---"
+  printf "%-4s %-18s %-12s %-16s %-8s %-10s %-15s %-8s %-9s %s\n" "#" "NAME" "KEY" "FOREIGN_IP" "SSH" "ZP" "PORTS" "SVC" "LISTEN" "SSH"
+  printf "%-4s %-18s %-12s %-16s %-8s %-10s %-15s %-8s %-9s %s\n" "--" "------------------" "------------" "----------------" "------" "----------" "---------------" "------" "---------" "---"
 
   local i
   for ((i=0; i<${#T_KEYS[@]}; i++)); do
@@ -991,12 +1284,13 @@ dashboard_table() {
       ssh_badge="${ssh_check}"
     fi
 
-    printf "%-4s %-18s %-12s %-16s %-8s %-15s %-8b %-9b %b\n" \
+    printf "%-4s %-18s %-12s %-16s %-8s %-10s %-15s %-8b %-9b %b\n" \
       "$((i+1))" \
       "${label:0:18}" \
       "${key:0:12}" \
       "${ip:0:16}" \
       "${ssh_port}" \
+      "${zp:0:10}" \
       "${ports_csv//,/ }" \
       "$(status_badge "${svc_state}")" \
       "${listen_badge} ${C_DIM}(${listen_ratio})${C_RESET}" \
@@ -1097,6 +1391,7 @@ Options:
   --menu             Open interactive menu (default)
   --initial-setup    Run initial setup flow directly
   --add-target       Add a new tunnel target directly
+  --edit             Edit an existing tunnel (interactive selector)
   --dashboard        Show the tunnel dashboard (summary + drill-down)
   --profile          Select/apply zapret2 profile (Profile 1/2/3 menu)
   --restart-all      Restart/rebuild all tunnel services
@@ -1113,11 +1408,12 @@ show_main_menu() {
   echo "1) Initial setup (fresh install/reset + add first tunnel)"
   echo "2) Add new tunnel (server/ports)"
   echo "3) List configured tunnels"
-  echo "4) Remove a tunnel"
-  echo "5) Restart/rebuild all tunnel services"
-  echo "6) Tunnel dashboard (pretty status + details)"
-  echo "7) Change Zapret2 profile (switch /etc/zapret2.lua)"
-  echo "8) Install/update management command (${MANAGER_COMMAND})"
+  echo "4) Edit a tunnel"
+  echo "5) Remove a tunnel"
+  echo "6) Restart/rebuild all tunnel services"
+  echo "7) Tunnel dashboard (pretty status + details)"
+  echo "8) Change Zapret2 profile (switch /etc/zapret2.lua)"
+  echo "9) Install/update management command (${MANAGER_COMMAND})"
   echo "0) Exit"
 }
 
@@ -1140,21 +1436,25 @@ run_menu() {
         pause_prompt
         ;;
       4)
-        remove_target_flow
+        edit_tunnel_flow
         pause_prompt
         ;;
       5)
-        restart_all_tunnels
+        remove_target_flow
         pause_prompt
         ;;
       6)
-        dashboard_flow
+        restart_all_tunnels
+        pause_prompt
         ;;
       7)
+        dashboard_flow
+        ;;
+      8)
         select_and_apply_profile_menu
         pause_prompt
         ;;
-      8)
+      9)
         install_manager_command
         pause_prompt
         ;;
@@ -1189,6 +1489,9 @@ main() {
       ;;
     --add-target)
       add_target_flow
+      ;;
+    --edit)
+      edit_tunnel_flow
       ;;
     --dashboard)
       dashboard_flow

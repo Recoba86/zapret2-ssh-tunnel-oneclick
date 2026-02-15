@@ -15,12 +15,14 @@ Menu-driven Bash manager for building and maintaining obfuscated SSH tunnels on 
 
 - Interactive menu for setup and lifecycle management
 - Root check and package automation (`sshpass`, `curl`, `wget`, `net-tools`, `openssh-client` if needed)
-- Optional destructive initial setup (iptables flush/reset + service cleanup)
+- Optional destructive initial setup (iptables flush/reset + service cleanup) with typed confirmation
 - Zapret2 install/start automation
 - NFQUEUE rule automation per SSH destination port
 - SSH key creation + optional `ssh-copy-id` automation
 - End-to-end service and listening-port verification
 - Pretty dashboard view: SVC state, local listen ratio, and quick SSH connectivity check
+- Per-tunnel bind address selection (`127.0.0.1` recommended, or `0.0.0.0` for public)
+- Edit tunnels in-place (rename, ports, host/port, bind address)
 
 ## Requirements
 
@@ -42,7 +44,7 @@ wget -qO- https://raw.githubusercontent.com/Recoba86/zapret2-ssh-tunnel-oneclick
 
 ## Install Persistent Command
 
-From inside the menu choose option `8`, or run directly:
+From inside the menu choose option `9`, or run directly:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Recoba86/zapret2-ssh-tunnel-oneclick/main/setup_zapret2_tunnel.sh) --install-command
@@ -60,6 +62,7 @@ sudo zapret2-tunnel
 sudo ./setup_zapret2_tunnel.sh --menu
 sudo ./setup_zapret2_tunnel.sh --initial-setup
 sudo ./setup_zapret2_tunnel.sh --add-target
+sudo ./setup_zapret2_tunnel.sh --edit
 sudo ./setup_zapret2_tunnel.sh --dashboard
 sudo ./setup_zapret2_tunnel.sh --profile
 sudo ./setup_zapret2_tunnel.sh --restart-all
@@ -83,6 +86,13 @@ The script will use a local file next to the script if available; otherwise it d
 
 When adding a tunnel, you choose a friendly name (examples: `Sweden`, `UK`, `Germany-1`).
 The manager derives a safe key from it (used for systemd unit names).
+
+## Bind Address
+
+Each tunnel’s local forwards can bind to:
+
+- `127.0.0.1` (recommended): only accessible locally on the server
+- `0.0.0.0`: accessible on all interfaces (public)
 
 ## Multi-Server Mapping Example
 
