@@ -1451,7 +1451,11 @@ is_port_listening() {
 }
 
 target_ports_health() {
-  # Input: ports_csv. Output: "ok_count/total" and returns 0 if all ok.
+  # Input: ports_csv. Output: "ok_count/total"
+  #
+  # Important: this function must not return non-zero in normal operation.
+  # The manager runs with `set -e` and uses this in command substitution; a
+  # non-zero return would trigger the ERR trap and exit the whole script.
   local ports_csv="$1"
   local -a ports_arr=()
   IFS=',' read -r -a ports_arr <<<"${ports_csv}"
@@ -1466,7 +1470,7 @@ target_ports_health() {
   done
 
   echo "${ok}/${total}"
-  [[ ${ok} -eq ${total} ]]
+  return 0
 }
 
 ssh_connectivity_check() {
