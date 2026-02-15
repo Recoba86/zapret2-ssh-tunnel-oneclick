@@ -33,6 +33,7 @@ MANAGER_COMMAND="/usr/local/sbin/zapret2-tunnel"
 ZAPRET_ARCHIVE_URL="https://h4.linklick.ir/b7d0be65a9a3ddfe3fa03008b69680fc/zapret2.tar.gz"
 SELF_INSTALL_URL="https://raw.githubusercontent.com/Recoba86/zapret2-ssh-tunnel-oneclick/main/setup_zapret2_tunnel.sh"
 PROFILES_BASE_URL="https://raw.githubusercontent.com/Recoba86/zapret2-ssh-tunnel-oneclick/main"
+PROFILES_FALLBACK_BASE_URL="https://cdn.jsdelivr.net/gh/Recoba86/zapret2-ssh-tunnel-oneclick@main"
 NFQUEUE_NUM="100"
 
 # targets.conf format (new):
@@ -233,16 +234,32 @@ download_to_file() {
   local url="$1"
   local dest="$2"
 
+  local tmp
+  tmp="$(mktemp)"
+
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "${url}" -o "${dest}"
-    return 0
+    if curl -fSL --connect-timeout 10 --max-time 45 -sS "${url}" -o "${tmp}"; then
+      if [[ -s "${tmp}" ]]; then
+        mv -f "${tmp}" "${dest}"
+        return 0
+      fi
+    fi
+    rm -f "${tmp}"
+    return 1
   fi
   if command -v wget >/dev/null 2>&1; then
-    wget -qO "${dest}" "${url}"
-    return 0
+    if wget -qO "${tmp}" "${url}"; then
+      if [[ -s "${tmp}" ]]; then
+        mv -f "${tmp}" "${dest}"
+        return 0
+      fi
+    fi
+    rm -f "${tmp}"
+    return 1
   fi
 
   log_error "Neither curl nor wget is available to download ${url}"
+  rm -f "${tmp}" 2>/dev/null || true
   return 1
 }
 
@@ -258,6 +275,8 @@ backup_file_if_exists() {
 current_profile_name() {
   if [[ -s "${PROFILE_META_FILE}" ]]; then
     cat "${PROFILE_META_FILE}" | head -n 1
+  elif [[ -f /etc/zapret2.lua ]]; then
+    echo "custom"
   else
     echo "unknown"
   fi
@@ -278,13 +297,28 @@ download_profile_file() {
   local filename="$1"
   local dest="$2"
 
-  local url_root="${PROFILES_BASE_URL}/${filename}"
-  local url_scripts="${PROFILES_BASE_URL}/scripts/${filename}"
+  local -a bases=("${PROFILES_BASE_URL}" "${PROFILES_FALLBACK_BASE_URL}")
+  local base
+  for base in "${bases[@]}"; do
+    local url_root="${base}/${filename}"
+    local url_scripts="${base}/scripts/${filename}"
 
-  if download_to_file "${url_root}" "${dest}" 2>/dev/null; then
-    return 0
-  fi
-  download_to_file "${url_scripts}" "${dest}"
+    if download_to_file "${url_root}" "${dest}"; then
+      log_success "Downloaded profile from: ${url_root}"
+      return 0
+    fi
+    if download_to_file "${url_scripts}" "${dest}"; then
+      log_success "Downloaded profile from: ${url_scripts}"
+      return 0
+    fi
+  done
+
+  log_error "Failed to download profile '${filename}'."
+  log_error "Tried: ${PROFILES_BASE_URL}/${filename}"
+  log_error "Tried: ${PROFILES_BASE_URL}/scripts/${filename}"
+  log_error "Tried: ${PROFILES_FALLBACK_BASE_URL}/${filename}"
+  log_error "Tried: ${PROFILES_FALLBACK_BASE_URL}/scripts/${filename}"
+  return 1
 }
 
 apply_zapret2_profile() {
