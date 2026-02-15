@@ -12,4 +12,4 @@ dpi_desync_fooling = "md5sig,badseq"
 dpi_desync_fake_http = "GET /search?q=open+source+ssh+tunnel HTTP/1.1\r\nHost: www.google.com\r\nUser-Agent: Mozilla/5.0\r\n\r\n"
 
 -- Reduced MSS to force fragmentation
-tcp_mss = 1320
+tcp_mss = 1300
