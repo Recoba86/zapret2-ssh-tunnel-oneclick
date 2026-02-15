@@ -1524,6 +1524,15 @@ status_badge() {
   esac
 }
 
+status_text() {
+  # Plain text status for aligned table output (ANSI colors break width calculations).
+  local state="$1"
+  case "${state}" in
+    OK|WARN|DOWN) echo "${state}" ;;
+    *) echo "${state}" ;;
+  esac
+}
+
 dashboard_table() {
   ensure_storage
 
@@ -1565,25 +1574,24 @@ dashboard_table() {
 
     local listen_ratio
     listen_ratio="$(target_ports_health "${ports_csv}")"
-    local listen_badge
+    local listen_state="WARN"
     if [[ "${listen_ratio}" == */* ]] && [[ "${listen_ratio%/*}" == "${listen_ratio#*/}" ]]; then
-      listen_badge="$(status_badge OK)"
-    else
-      listen_badge="$(status_badge WARN)"
+      listen_state="OK"
     fi
 
     local ssh_check
     ssh_check="$(ssh_connectivity_check "${ip}" "${ssh_port}")"
-    local ssh_badge
+    local ssh_state="WARN"
     if [[ "${ssh_check}" == "OK" ]]; then
-      ssh_badge="$(status_badge OK)"
+      ssh_state="OK"
     elif [[ "${ssh_check}" == "FAIL" ]]; then
-      ssh_badge="$(status_badge WARN)"
+      ssh_state="WARN"
     else
-      ssh_badge="${ssh_check}"
+      ssh_state="${ssh_check}"
     fi
 
-    printf "%-4s %-18s %-12s %-16s %-8s %-10s %-15s %-8b %-9b %b\n" \
+    # Keep dashboard table plain-text for perfect alignment (no ANSI in cells).
+    printf "%-4s %-18s %-12s %-16s %-8s %-10s %-15s %-8s %-9s %s\n" \
       "$((i+1))" \
       "${label:0:18}" \
       "${key:0:12}" \
@@ -1591,13 +1599,13 @@ dashboard_table() {
       "${ssh_port}" \
       "${zp:0:10}" \
       "${ports_csv//,/ }" \
-      "$(status_badge "${svc_state}")" \
-      "${listen_badge} ${C_DIM}(${listen_ratio})${C_RESET}" \
-      "${ssh_badge}"
+      "$(status_text "${svc_state}")" \
+      "$(status_text "${listen_state}") ${listen_ratio}" \
+      "$(status_text "${ssh_state}")"
   done
 
   echo
-  echo -e "${C_DIM}Legend:${C_RESET} SVC=systemd state, LISTEN=local ports listening, SSH=quick key-based connectivity test"
+  echo -e "${C_DIM}Legend:${C_RESET} SVC=systemd state, LISTEN=local ports listening ratio, SSH=quick key-based connectivity test"
 }
 
 dashboard_details() {
