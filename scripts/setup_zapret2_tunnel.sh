@@ -198,6 +198,8 @@ service_name_for_target() {
 read_target_line() {
   # Input: a single line (pipe-separated). Output: key|label|ip|ssh_port|bind_addr|ports_csv
   local line="$1"
+  # Handle CRLF files (common if edited on Windows/macOS tools).
+  line="${line//$'\r'/}"
   local f1 f2 f3 f4 f5 f6
   IFS='|' read -r f1 f2 f3 f4 f5 f6 <<<"${line}"
 
@@ -822,12 +824,20 @@ select_target_index() {
 build_forward_flags() {
   local bind_addr="$1"
   local ports_csv="$2"
+  bind_addr="${bind_addr//$'\r'/}"
+  ports_csv="${ports_csv//$'\r'/}"
   local -a ports_arr=()
   local flags=""
   local p
 
   IFS=',' read -r -a ports_arr <<<"${ports_csv}"
   for p in "${ports_arr[@]}"; do
+    p="${p//$'\r'/}"
+    [[ -n "${p}" ]] || continue
+    if ! validate_port "${p}"; then
+      log_warn "Skipping invalid port in config: '${p}'"
+      continue
+    fi
     flags+="-L ${bind_addr}:${p}:localhost:${p} "
   done
 
@@ -846,6 +856,10 @@ write_target_service() {
 
   unit_name="$(service_name_for_target "${target_key}")"
   forward_flags="$(build_forward_flags "${bind_addr}" "${ports_csv}")"
+  if [[ -z "${forward_flags}" ]]; then
+    log_error "No valid ports found for tunnel '${target_key}'. Cannot create ${unit_name}."
+    return 1
+  fi
 
   cat > "/etc/systemd/system/${unit_name}" <<UNIT
 [Unit]
