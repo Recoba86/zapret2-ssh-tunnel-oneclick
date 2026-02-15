@@ -63,6 +63,7 @@ sudo ./setup_zapret2_tunnel.sh --menu
 sudo ./setup_zapret2_tunnel.sh --initial-setup
 sudo ./setup_zapret2_tunnel.sh --add-target
 sudo ./setup_zapret2_tunnel.sh --edit
+sudo ./setup_zapret2_tunnel.sh --power
 sudo ./setup_zapret2_tunnel.sh --dashboard
 sudo ./setup_zapret2_tunnel.sh --profile
 sudo ./setup_zapret2_tunnel.sh --restart-all

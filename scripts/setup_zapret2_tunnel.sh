@@ -516,6 +516,93 @@ uninstall_flow() {
   log_success "Uninstall completed. System should be clean."
 }
 
+ensure_unit_present_for_selected() {
+  # If the systemd unit file is missing (e.g. deleted manually), rebuild it from config.
+  local idx="$1"
+  local key="${T_KEYS[${idx}]}"
+  local ip="${T_IPS[${idx}]}"
+  local ssh_port="${T_SSH_PORTS[${idx}]}"
+  local bind="${T_BINDS[${idx}]}"
+  local ports_csv="${T_PORTS_CSV[${idx}]}"
+
+  local unit
+  unit="$(service_name_for_target "${key}")"
+
+  if [[ -f "/etc/systemd/system/${unit}" ]]; then
+    return 0
+  fi
+
+  log_warn "Unit file missing for ${unit}. Rebuilding from stored config..."
+  write_target_service "${key}" "${ip}" "${ssh_port}" "${bind}" "${ports_csv}"
+}
+
+tunnel_power_flow() {
+  ensure_storage
+
+  if [[ ! -s "${TARGETS_FILE}" ]]; then
+    log_warn "No tunnels configured yet."
+    return 0
+  fi
+
+  if ! select_target_index; then
+    log_info "Canceled."
+    return 0
+  fi
+
+  local idx="${SELECTED_IDX}"
+  local key="${T_KEYS[${idx}]}"
+  local label="${T_LABELS[${idx}]}"
+  local unit
+  unit="$(service_name_for_target "${key}")"
+
+  while true; do
+    local active enabled
+    active="$(systemctl is-active "${unit}" 2>/dev/null || true)"
+    enabled="$(systemctl is-enabled "${unit}" 2>/dev/null || true)"
+
+    echo
+    echo -e "${C_BOLD}Tunnel Power Control${C_RESET}"
+    echo "Tunnel: ${label} (${unit})"
+    echo "State:  active=${active}, enabled=${enabled}"
+    echo
+    echo "1) Stop (temporary off)"
+    echo "2) Start (temporary on)"
+    echo "3) Disable + Stop (off at boot)"
+    echo "4) Enable + Start (on at boot)"
+    echo "0) Back"
+
+    local choice
+    read -r -p "Select an option: " choice
+
+    case "${choice}" in
+      1)
+        systemctl stop "${unit}" 2>/dev/null || true
+        log_success "Stopped: ${label}"
+        ;;
+      2)
+        ensure_unit_present_for_selected "${idx}"
+        systemctl start "${unit}" 2>/dev/null || true
+        log_success "Started: ${label}"
+        ;;
+      3)
+        systemctl disable --now "${unit}" 2>/dev/null || true
+        log_success "Disabled + stopped: ${label}"
+        ;;
+      4)
+        ensure_unit_present_for_selected "${idx}"
+        systemctl enable --now "${unit}" 2>/dev/null || true
+        log_success "Enabled + started: ${label}"
+        ;;
+      0)
+        return 0
+        ;;
+      *)
+        log_warn "Invalid option."
+        ;;
+    esac
+  done
+}
+
 kill_existing_tunnel_processes() {
   log_info "Killing existing SSH tunnel processes..."
   local pids
@@ -1464,6 +1551,7 @@ Options:
   --initial-setup    Run initial setup flow directly
   --add-target       Add a new tunnel target directly
   --edit             Edit an existing tunnel (interactive selector)
+  --power            Start/stop or enable/disable a tunnel (interactive selector)
   --dashboard        Show the tunnel dashboard (summary + drill-down)
   --profile          Select/apply zapret2 profile (Profile 1/2/3 menu)
   --restart-all      Restart/rebuild all tunnel services
@@ -1487,7 +1575,8 @@ show_main_menu() {
   echo "7) Tunnel dashboard (pretty status + details)"
   echo "8) Change Zapret2 profile (switch /etc/zapret2.lua)"
   echo "9) Install/update management command (${MANAGER_COMMAND})"
-  echo "10) Uninstall (remove everything managed by this script)"
+  echo "10) Enable/Disable a tunnel (start/stop)"
+  echo "11) Uninstall (remove everything managed by this script)"
   echo "0) Exit"
 }
 
@@ -1533,6 +1622,10 @@ run_menu() {
         pause_prompt
         ;;
       10)
+        tunnel_power_flow
+        pause_prompt
+        ;;
+      11)
         uninstall_flow
         pause_prompt
         ;;
@@ -1570,6 +1663,9 @@ main() {
       ;;
     --edit)
       edit_tunnel_flow
+      ;;
+    --power)
+      tunnel_power_flow
       ;;
     --dashboard)
       dashboard_flow
