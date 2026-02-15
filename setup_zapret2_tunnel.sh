@@ -370,13 +370,15 @@ select_and_apply_profile_menu() {
 }
 
 prompt_bind_address() {
-  local default="${1:-127.0.0.1}"
+  # Default to public bind (0.0.0.0) so remote clients can connect, but warn users.
+  local default="${1:-0.0.0.0}"
   local choice
 
   echo
   echo -e "${C_BOLD}Bind Address For Local Forwards${C_RESET}"
   echo "1) 127.0.0.1  (Recommended: only local access)"
   echo "2) 0.0.0.0    (Public: listen on all interfaces)"
+  echo -e "${C_YELLOW}Note:${C_RESET} If you choose 0.0.0.0, make sure your firewall restricts access to these ports."
 
   while true; do
     if [[ "${default}" == "0.0.0.0" ]]; then
@@ -894,7 +896,7 @@ append_target_config() {
   target_label="${target_label//|/}"
 
   if ! validate_bind_addr "${bind_addr}"; then
-    bind_addr="127.0.0.1"
+    bind_addr="0.0.0.0"
   fi
 
   echo "${target_key}|${target_label}|${foreign_ip}|${foreign_ssh_port}|${bind_addr}|${ports_csv}" >> "${TARGETS_FILE}"
@@ -951,7 +953,7 @@ prompt_target_details() {
     exit 1
   fi
 
-  TARGET_BIND_ADDR="$(prompt_bind_address "127.0.0.1")"
+  TARGET_BIND_ADDR="$(prompt_bind_address "0.0.0.0")"
 
   while true; do
     read -r -a TARGET_PORTS -p "Enter local ports for this tunnel (space-separated, e.g. 31 32 4000): "

@@ -96,6 +96,8 @@ Each tunnel’s local forwards can bind to:
 - `127.0.0.1` (recommended): only accessible locally on the server
 - `0.0.0.0`: accessible on all interfaces (public)
 
+Default: new tunnels default to `0.0.0.0` to support remote clients (ensure firewall rules).
+
 ## Multi-Server Mapping Example
 
 - Local port `31` -> Sweden server
